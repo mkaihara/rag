@@ -4,8 +4,9 @@
    full-text) each return `candidates` chunks.
 2. Reciprocal Rank Fusion merges the two rankings. Keyword search catches
    exact identifiers the embedding may blur (MQRTR, SD2, PS3, Cell SPU).
-3. Near-duplicates are dropped: the theses reuse text from the papers, and
-   two copies of one passage would waste the small local context.
+3. Near-duplicates are dropped: papers often repeat passages (between
+   versions, or a thesis reusing a paper), and two copies of one passage
+   would waste the small local context.
 """
 
 from __future__ import annotations
@@ -71,8 +72,9 @@ def retrieve(conn: psycopg.Connection, embedder: Embedder, settings: Settings, q
 
 SYSTEM_PROMPT = """You are a research assistant answering questions about the publications of \
 Marcelo E. Kaihara and his co-authors on hardware algorithms for modular arithmetic \
-(Montgomery multiplication, modular division, RNS bases) and on Pollard's rho method \
-for elliptic curve discrete logarithms.
+(Montgomery, bipartite and binary/Euclidean modular multiplication and division) and on \
+the security of RSA and elliptic curve cryptography (integer factorization, Pollard's rho \
+method, computations on clusters and PlayStation 3 consoles).
 
 Rules:
 - Answer only from the numbered sources provided. If they do not contain the answer, \

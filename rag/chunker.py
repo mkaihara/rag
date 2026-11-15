@@ -51,24 +51,14 @@ EXCLUDED_SECTIONS = re.compile(r"^\s*(references?|bibliography|literature cited)
 # Confirmed metadata for documents whose Markdown lacks a parseable title or
 # author list (keyed by data subfolder). These take precedence over the file.
 DOC_OVERRIDES = {
-    "ModMulDiv_Bipartite_Pipelined": {
-        "title": "Pipelined Bipartite Modular Multiplication",
-        "authors": ["Marcelo E. Kaihara", "Naofumi Takagi"],
-    },
-    "ECC_RSA_KeySizes_md": {
+    "ECC_RSA_KeySizes": {
         "authors": ["Joppe W. Bos", "Marcelo E. Kaihara", "Thorsten Kleinjung", "Arjen K. Lenstra", "Peter L. Montgomery"],
     },
-    "ModMulDiv_Euclidean": {
-        "authors": ["Marcelo E. Kaihara", "Naofumi Takagi"],
+    "PhD_thesis": {
+        "authors": ["Marcelo E. Kaihara"],
     },
-    "Pollard_rho_Flash_Informatique_md": {
+    "Pollard_rho_Flash_Informatique": {
         "authors": ["Joppe W. Bos", "Marcelo E. Kaihara", "Thorsten Kleinjung", "Arjen K. Lenstra", "Dag Arne Osvik"],
-    },
-    "Pollard_rho_Journal_md": {
-        "authors": ["Joppe W. Bos", "Marcelo E. Kaihara", "Thorsten Kleinjung", "Arjen K. Lenstra"],
-    },
-    "SelectedRNSBases_ARITH19": {
-        "authors": ["Jean-Claude Bajard", "Marcelo Kaihara", "Thomas Plantard"],
     },
 }
 

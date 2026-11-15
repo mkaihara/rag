@@ -24,7 +24,7 @@ profiles:
       dimensions: 1024
       max_input_tokens: 32768
       # Qwen3-Embedding expects an instruction on queries (not on documents).
-      query_instruction: "Given a question about modular arithmetic hardware or Pollard rho research papers, retrieve passages that answer it"
+      query_instruction: "Given a question about modular arithmetic hardware algorithms or the security of RSA and elliptic curve cryptography, retrieve passages that answer it"
     # Small chunks keep the prompt short: CPU prompt processing, not the
     # embedder, is the bottleneck (top_k x max_tokens ~ 3k tokens).
     chunking:
@@ -56,7 +56,7 @@ profiles:
       api_key_env: OPENROUTER_API_KEY
       dimensions: 1024                # Matryoshka-truncated from 4096
       max_input_tokens: 40960
-      query_instruction: "Given a question about modular arithmetic hardware or Pollard rho research papers, retrieve passages that answer it"
+      query_instruction: "Given a question about modular arithmetic hardware algorithms or the security of RSA and elliptic curve cryptography, retrieve passages that answer it"
     chunking:
       target_tokens: 700
       max_tokens: 1000
