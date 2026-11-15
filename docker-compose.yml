@@ -1,0 +1,91 @@
+# Offline RAG demo (config.yaml profile "local"). Everything runs on CPU.
+#
+#   docker compose up --build        then open http://localhost:8000
+#
+# First start downloads ~4 GB of models (kept in the "ollama" volume) and
+# embeds the corpus into Postgres; later starts reuse both.
+# Needs ~8 GB of RAM available to Docker.
+#
+# Model names must match profiles.local in config.yaml. Override both with
+# e.g. LLM_MODEL=qwen3.5:2b docker compose up (and edit config.yaml).
+
+name: rag-demo
+
+x-rag-env: &rag-env
+  RAG_PROFILE: local
+  DATABASE_URL: postgresql://rag:rag@db:5432/rag
+  OLLAMA_BASE_URL: http://ollama:11434
+
+services:
+  ollama:
+    image: ollama/ollama:0.40.13
+    environment:
+      OLLAMA_KEEP_ALIVE: 30m        # keep models in RAM between questions
+      OLLAMA_MAX_LOADED_MODELS: "2" # LLM and embedder side by side
+      OLLAMA_NUM_PARALLEL: "1"      # one request at a time is fastest on CPU
+      OLLAMA_CONTEXT_LENGTH: "8192"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # One-shot: pull the models into the ollama volume (no-op once present).
+  models:
+    image: ollama/ollama:0.40.13
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - ollama pull "${LLM_MODEL:-qwen3.5:4b}" && ollama pull "${EMBED_MODEL:-qwen3-embedding:0.6b}"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  db:
+    image: pgvector/pgvector:0.8.7-pg17
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag   # local-only demo database, not exposed
+      POSTGRES_DB: rag
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # One-shot: chunk data/ and embed the chunks into pgvector. Skips the work
+  # when the stored index already matches the corpus and profile.
+  indexer:
+    build: .
+    command: ["python", "-m", "rag.ingest"]
+    environment: *rag-env
+    volumes:
+      - ./data:/app/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      models:
+        condition: service_completed_successfully
+    restart: "no"
+
+  app:
+    build: .
+    environment: *rag-env
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      indexer:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  ollama:
+  pgdata:
