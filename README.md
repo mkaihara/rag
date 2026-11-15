@@ -87,7 +87,13 @@ question ──► embed ──► vector search ─┐              │
 4. Deploy the `Dockerfile` to any container host (Fly.io, Render, Railway,
    Cloud Run…) with `RAG_PROFILE=cloud`, `DATABASE_URL` and
    `OPENROUTER_API_KEY` set. The app listens on `$PORT` (default 8000) and
-   rate-limits each client IP (`server.rate_limit_per_minute`).
+   rate-limits each client IP (`server.rate_limit_per_minute`) and all
+   clients together (`server.global_rate_limit_per_minute`).
+   Client IPs come from `X-Forwarded-For` only as far as
+   `server.trusted_proxy_hops` (default 1, one platform proxy) allows; set
+   `TRUSTED_PROXY_HOPS` to match your host, or 0 if the container is
+   reachable without the proxy. Errors shown on the page are generic, with
+   an id to find the details in the app log.
 
 ## Development
 

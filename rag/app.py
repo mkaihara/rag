@@ -6,7 +6,11 @@ POST /api/ask {"question": "..."} streams newline-delimited JSON events:
     {"type": "sources", "sources": [...]}   retrieved chunks, numbered from 1
     {"type": "token", "text": "..."}         answer text as it is generated
     {"type": "done", "timings": {...}}       retrieval / first-token / total ms
-    {"type": "error", "message": "..."}      if anything fails
+    {"type": "error", "message": "..."}      if anything fails (generic; details in the log)
+
+Behind a hosting platform's proxy, set TRUSTED_PROXY_HOPS (or
+server.trusted_proxy_hops) to the number of proxies in front of the app so
+rate limits apply to the real client address.
 """
 
 from __future__ import annotations
@@ -14,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import secrets
 import time
-from collections import defaultdict, deque
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -81,28 +87,73 @@ app = FastAPI(title="Research papers RAG", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 # --------------------------------------------------------------------------
-# Per-IP rate limit (sliding one-minute window, in memory: one process only)
+# Rate limits: per client and for the whole app, over a sliding one-minute
+# window, in memory (one process only).
 
-_hits: dict[str, deque[float]] = defaultdict(deque)
+WINDOW = 60.0
+MAX_TRACKED_CLIENTS = 10_000
+GLOBAL_KEY = "*"  # not a valid IP address, so no client can collide with it
+_hits: dict[str, deque[float]] = {}
+
+
+def trusted_proxy_hops() -> int:
+    return int(os.environ.get("TRUSTED_PROXY_HOPS") or settings.server.get("trusted_proxy_hops", 0))
 
 
 def client_ip(request: Request) -> str:
-    # Behind the hosting platform's proxy, the rightmost X-Forwarded-For entry
-    # is the address that proxy saw; earlier entries can be forged by the client.
-    forwarded = request.headers.get("x-forwarded-for")
-    return forwarded.split(",")[-1].strip() if forwarded else (request.client.host if request.client else "?")
+    """The address to rate-limit by.
+
+    By default the TCP peer. Only when the app runs behind N trusted proxies
+    (trusted_proxy_hops) is X-Forwarded-For used: each proxy appends the
+    address it received the request from, so the Nth entry from the right
+    was written by the outermost trusted proxy. Entries further left come
+    from the client and can be forged.
+    """
+    peer = request.client.host if request.client else "unknown"
+    hops = trusted_proxy_hops()
+    if hops <= 0:
+        return peer
+    forwarded = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+    return forwarded[-hops] if len(forwarded) >= hops else peer
+
+
+def _window(key: str, now: float) -> deque[float]:
+    hits = _hits.get(key, deque())
+    while hits and now - hits[0] >= WINDOW:
+        hits.popleft()
+    return hits
+
+
+def _forget_idle(now: float) -> None:
+    for key in [k for k, h in _hits.items() if not h or now - h[-1] >= WINDOW]:
+        del _hits[key]
 
 
 def check_rate_limit(request: Request) -> None:
-    limit = int(settings.server.get("rate_limit_per_minute", 0))
-    if limit <= 0:
+    per_client = int(settings.server.get("rate_limit_per_minute", 0))
+    overall = int(settings.server.get("global_rate_limit_per_minute", 0))
+    checks = []
+    if overall > 0:
+        checks.append((GLOBAL_KEY, overall, "The demo is busy right now. Please try again in a minute."))
+    if per_client > 0:
+        checks.append((client_ip(request), per_client, f"Rate limit: {per_client} questions per minute. Please wait a moment."))
+    if not checks:
         return
-    now, hits = time.monotonic(), _hits[client_ip(request)]
-    while hits and now - hits[0] > 60:
-        hits.popleft()
-    if len(hits) >= limit:
-        raise HTTPException(429, f"Rate limit: {limit} questions per minute. Please wait a moment.")
-    hits.append(now)
+    now = time.monotonic()
+    windows = []
+    for key, limit, message in checks:
+        hits = _window(key, now)
+        if len(hits) >= limit:
+            raise HTTPException(429, message)
+        windows.append((key, hits))
+    # Bound memory: drop idle clients, and refuse new ones if still full.
+    if len(_hits) >= MAX_TRACKED_CLIENTS:
+        _forget_idle(now)
+        if len(_hits) >= MAX_TRACKED_CLIENTS and any(key not in _hits for key, _ in windows):
+            raise HTTPException(429, "The demo is busy right now. Please try again in a minute.")
+    for key, hits in windows:
+        hits.append(now)
+        _hits[key] = hits
 
 
 # --------------------------------------------------------------------------
@@ -200,8 +251,12 @@ async def ask(q: Question, request: Request) -> StreamingResponse:
                     },
                 }
             )
-        except Exception as e:  # report to the page instead of cutting the stream
-            log.exception("ask failed")
-            yield _event({"type": "error", "message": str(e)[:500]})
+        except Exception:  # report to the page instead of cutting the stream
+            # Details (provider responses, database hosts) stay in the server log.
+            error_id = secrets.token_hex(4)
+            log.exception("ask failed [error %s]", error_id)
+            yield _event(
+                {"type": "error", "message": f"Something went wrong while answering (error {error_id}). Please try again."}
+            )
 
     return StreamingResponse(events(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
