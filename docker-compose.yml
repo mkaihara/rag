@@ -1,20 +1,29 @@
-# Offline RAG demo (config.yaml profile "local"). Everything runs on CPU.
+# Offline RAG demo (config.yaml profile "local"). Runs on CPU, no API keys.
 #
 #   docker compose up --build        then open http://localhost:8000
 #
 # First start downloads ~4 GB of models (kept in the "ollama" volume) and
-# embeds the corpus into Postgres; later starts reuse both.
-# Needs ~8 GB of RAM available to Docker.
+# loads the corpus into Postgres using the committed embedding cache
+# (embeddings/local.jsonl.gz), so nothing is embedded unless data changed.
+# Needs ~8 GB of RAM available to Docker. On CPU an answer starts after
+# about a minute: the model must first read the retrieved passages.
 #
-# Model names must match profiles.local in config.yaml. Override both with
-# e.g. LLM_MODEL=qwen3.5:2b docker compose up (and edit config.yaml).
+# Faster on a Mac: Docker cannot use the GPU, but a native Ollama can.
+#   ollama serve            # in another terminal (https://ollama.com)
+#   OLLAMA_BASE_URL=http://host.docker.internal:11434 docker compose up --build
+#
+# Different models: LLM_MODEL=... EMBED_MODEL=... docker compose up
+# (the defaults are profiles.local in config.yaml; changing EMBED_MODEL
+# re-embeds the corpus).
 
 name: rag-demo
 
 x-rag-env: &rag-env
   RAG_PROFILE: local
   DATABASE_URL: postgresql://rag:rag@db:5432/rag
-  OLLAMA_BASE_URL: http://ollama:11434
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+  LLM_MODEL: ${LLM_MODEL:-}
+  EMBED_MODEL: ${EMBED_MODEL:-}
 
 services:
   ollama:
@@ -37,7 +46,9 @@ services:
   models:
     image: ollama/ollama:0.40.13
     environment:
-      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_HOST: ${OLLAMA_BASE_URL:-http://ollama:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # native Ollama on Linux hosts
     entrypoint: ["/bin/sh", "-c"]
     command:
       - ollama pull "${LLM_MODEL:-qwen3.5:4b}" && ollama pull "${EMBED_MODEL:-qwen3-embedding:0.6b}"
@@ -61,14 +72,18 @@ services:
       retries: 20
     restart: unless-stopped
 
-  # One-shot: chunk data/ and embed the chunks into pgvector. Skips the work
-  # when the stored index already matches the corpus and profile.
+  # One-shot: chunk data/ and load the chunks into pgvector, embedding only
+  # chunks missing from the cache. Skips the work when the stored index
+  # already matches the corpus and profile.
   indexer:
     build: .
+    image: rag-demo-app
     command: ["python", "-m", "rag.ingest"]
     environment: *rag-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # native Ollama on Linux hosts
     volumes:
-      - ./data:/app/data:ro
+      - ${RAG_DATA_DIR:-./data}:/app/data:ro
     depends_on:
       db:
         condition: service_healthy
@@ -78,7 +93,10 @@ services:
 
   app:
     build: .
+    image: rag-demo-app
     environment: *rag-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # native Ollama on Linux hosts
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

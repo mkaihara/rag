@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+.env.*
+**/__pycache__
+.ruff_cache
+.pytest_cache
+data
+index
+tests
+rag/static/vendor
