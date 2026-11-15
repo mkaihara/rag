@@ -27,3 +27,6 @@ data/**/*.bib
 .DS_Store
 *~
 *.swp
+
+# Vendored JS/CSS (scripts/fetch_vendor.py)
+rag/static/vendor/

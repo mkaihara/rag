@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ask the Papers</title>
+  <meta name="description" content="Retrieval-augmented question answering over research papers on modular arithmetic hardware and Pollard's rho method.">
+  <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="masthead">
+    <div class="wrap">
+      <p class="kicker">Retrieval-augmented generation demo</p>
+      <h1>Ask the Papers</h1>
+      <p class="lede">
+        Questions answered from twelve publications by Marcelo E. Kaihara and co-authors:
+        hardware algorithms for modular multiplication and division, RNS bases, and
+        Pollard's rho method for elliptic-curve discrete logarithms. Every claim cites the passage it came from.
+      </p>
+      <p class="meta" id="meta">Loading index…</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <form id="ask" class="ask" autocomplete="off">
+      <label for="question" class="sr-only">Your question</label>
+      <textarea id="question" rows="2" maxlength="1000"
+        placeholder="e.g. How does Montgomery multiplication avoid trial division?" required></textarea>
+      <button type="submit" id="submit">Ask</button>
+    </form>
+    <div class="examples" id="examples" aria-label="Example questions">
+      <button type="button">How does bipartite modular multiplication split the multiplier?</button>
+      <button type="button">How long would the 112-bit ECDLP take on PlayStation 3 consoles?</button>
+      <button type="button">Why choose RNS moduli of the form 2^k − 2^t − 1?</button>
+      <button type="button">How does the extended Euclidean modular division algorithm work in hardware?</button>
+    </div>
+
+    <section id="result" class="result" hidden>
+      <article class="answer">
+        <h2>Answer</h2>
+        <div id="answer" class="prose" aria-live="polite"></div>
+        <p id="timings" class="timings"></p>
+      </article>
+      <aside class="sources">
+        <h2>Sources <span id="source-count" class="count"></span></h2>
+        <ol id="sources"></ol>
+      </aside>
+    </section>
+
+    <details class="corpus">
+      <summary>What's in the index</summary>
+      <ul id="documents"></ul>
+    </details>
+  </main>
+
+  <footer class="wrap footer">
+    Hybrid retrieval (pgvector + Postgres full-text, reciprocal rank fusion) over section-aware chunks;
+    answers stream from the configured LLM.
+  </footer>
+
+  <script src="/static/vendor/katex/katex.min.js"></script>
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
