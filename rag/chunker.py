@@ -24,15 +24,17 @@ Output is JSON Lines, one chunk per line, plus a manifest.json with the
 chunking parameters.
 
 Usage:
-    uv run --with tiktoken --with pyyaml scripts/chunk_md.py <data_dir> [--profile local|cloud] [--out out.jsonl]
+    uv run python -m rag.chunker <data_dir> [--profile local|cloud] [--out out.jsonl]
     (default out: <data_dir>/../index/<profile>/chunks.jsonl)
+
+The indexer (rag.ingest) calls chunk_corpus() directly; the CLI is for
+inspecting the chunks.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -41,23 +43,7 @@ from pathlib import Path
 import tiktoken
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-@dataclass(frozen=True)
-class ChunkParams:
-    target_tokens: int  # pack paragraphs up to about this size
-    max_tokens: int  # split any block larger than this
-    min_lead_tokens: int  # shorter section lead-ins merge into their first subsection
-
-
-def load_params(profile: str | None) -> tuple[str, ChunkParams]:
-    config = yaml.safe_load((REPO_ROOT / "config.yaml").read_text(encoding="utf-8"))
-    name = profile or os.environ.get("RAG_PROFILE") or config["default_profile"]
-    if name not in config["profiles"]:
-        raise SystemExit(f"unknown profile {name!r}; choose from {sorted(config['profiles'])}")
-    return name, ChunkParams(**config["profiles"][name]["chunking"])
-
+from rag.config import ChunkParams, load_settings
 
 # Sections whose content is excluded from the index (matched on the heading).
 EXCLUDED_SECTIONS = re.compile(r"^\s*(references?|bibliography|literature cited)\s*$", re.I)
@@ -129,7 +115,7 @@ def parse_front_matter(text: str) -> tuple[dict, str]:
         meta = yaml.safe_load(m.group(1)) or {}
     except yaml.YAMLError:
         meta = {}
-    return meta, text[m.end():]
+    return meta, text[m.end() :]
 
 
 AFFILIATION = re.compile(r"universit|department|school|laborator|degree|thesis|@|\d{4}|japan", re.I)
@@ -298,14 +284,17 @@ def parse_table(text: str) -> tuple[list[str], list[list[str]]] | None:
         rows = []
         for g in groups:
             bounds = pipe_positions(g[0])
-            cells = [(a, " ".join(l[a + 1 : b].strip() for l in g if len(l) > a).strip()) for a, b in zip(bounds, bounds[1:])]
+            cells = [
+                (a, " ".join(l[a + 1 : b].strip() for l in g if len(l) > a).strip())
+                for a, b in zip(bounds, bounds[1:], strict=False)
+            ]
             rows.append(cells)
     else:  # pipe table: header, alignment line, body
         body = [l for l in lines[2:] if l.strip()]
         rows = []
         for l in [lines[0]] + body:
             bounds = pipe_positions(l)
-            rows.append([(k, l[a + 1 : b].strip()) for k, (a, b) in enumerate(zip(bounds, bounds[1:]))])
+            rows.append([(k, l[a + 1 : b].strip()) for k, (a, b) in enumerate(zip(bounds, bounds[1:], strict=False))])
         # pipe tables have no spans: key cells by column index, not character position
     if len(rows) < 2:
         return None
@@ -340,7 +329,7 @@ def split_table(block: Block, caption: str | None, params: ChunkParams) -> list[
     if not parsed:
         return None
     names, rows = parsed
-    lines = [f"Row {n}: " + ", ".join(f"{k}={v}" for k, v in zip(names, vals) if v) for n, vals in enumerate(rows, 1)]
+    lines = [f"Row {n}: " + ", ".join(f"{k}={v}" for k, v in zip(names, vals, strict=True) if v) for n, vals in enumerate(rows, 1)]
     title = caption or "Table"
     groups, cur, cur_tokens = [], [], 0
     for n, line in enumerate(lines, 1):
@@ -495,12 +484,27 @@ def build_chunks(doc: Document, params: ChunkParams) -> list[dict]:
                     "reference": reference,
                     "tokens": count_tokens(text),
                     "text": text,
-                    "embed_text": (
-                        f"Document: {doc.title}\nAuthors: {', '.join(doc.authors)}\nSection: {section_label}\n\n{text}"
-                    ),
+                    "embed_text": (f"Document: {doc.title}\nAuthors: {', '.join(doc.authors)}\nSection: {section_label}\n\n{text}"),
                 }
             )
     return records
+
+
+def chunk_corpus(data: Path, params: ChunkParams, log=print) -> list[dict]:
+    """Chunk every data/<doc>/*.md file. Returns the chunk records."""
+    all_records = []
+    for path in sorted(data.glob("*/*.md")):
+        if path.parent.name in EXCLUDED_DOCS:
+            log(f"{path.parent.name:36} excluded")
+            continue
+        doc = parse_document(path, data)
+        records = build_chunks(doc, params)
+        all_records += records
+        tokens = [r["tokens"] for r in records]
+        log(f"{doc.doc_id:36} {len(records):4} chunks  {sum(tokens):7} tokens  max {max(tokens):5}  | {doc.title[:60]}")
+    if not all_records:
+        raise SystemExit(f"no Markdown documents found under {data}/*/")
+    return all_records
 
 
 def main() -> None:
@@ -510,22 +514,14 @@ def main() -> None:
     ap.add_argument("--out", help="output JSONL (default: <data_dir>/../index/<profile>/chunks.jsonl)")
     args = ap.parse_args()
 
-    profile, params = load_params(args.profile)
+    settings = load_settings(args.profile)
+    profile, params = settings.profile, settings.chunking
     data = Path(args.data_dir).resolve()
     out = Path(args.out).resolve() if args.out else data.parent / "index" / profile / "chunks.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     print(f"profile {profile}: target {params.target_tokens}, max {params.max_tokens} tokens\n")
 
-    all_records = []
-    for path in sorted(data.glob("*/*.md")):
-        if path.parent.name in EXCLUDED_DOCS:
-            print(f"{path.parent.name:36} excluded")
-            continue
-        doc = parse_document(path, data)
-        records = build_chunks(doc, params)
-        all_records += records
-        tokens = [r["tokens"] for r in records]
-        print(f"{doc.doc_id:36} {len(records):4} chunks  {sum(tokens):7} tokens  max {max(tokens):5}  | {doc.title[:60]}")
+    all_records = chunk_corpus(data, params)
 
     with out.open("w", encoding="utf-8") as f:
         for r in all_records:
