@@ -1,0 +1,32 @@
+# Generated retrieval artifacts (rebuild with scripts/chunk_md.py + embedding step)
+index/
+
+# Secrets: OpenRouter key, Neon DATABASE_URL
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# Local model / database volumes if bind-mounted
+ollama/
+pgdata/
+
+# Original sources that must not be redistributed
+data/**/*.pdf
+data/**/*.tex
+data/**/*.bbl
+data/**/*.bib
+
+# OS / editor
+.DS_Store
+*~
+*.swp
+
+# Vendored JS/CSS (scripts/fetch_vendor.py)
+rag/static/vendor/

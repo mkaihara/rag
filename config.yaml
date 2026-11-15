@@ -1,0 +1,76 @@
+# RAG demo configuration. Pick a profile with RAG_PROFILE=local|cloud
+# (falls back to default_profile). Each profile builds its own index (table
+# chunks_<profile>), because chunk sizes and embedding models differ and
+# vectors from different embedding models are not comparable.
+#
+# Environment overrides: DATABASE_URL, OLLAMA_BASE_URL, OPENROUTER_API_KEY.
+default_profile: local
+
+profiles:
+  # Offline demo: `docker compose up` pulls Ollama + models, runs on CPU.
+  local:
+    llm:
+      provider: ollama
+      model: qwen3.5:4b          # ~3.3 GB Q4; use qwen3.5:2b on slow laptops
+      base_url: http://localhost:11434   # compose sets OLLAMA_BASE_URL
+      num_ctx: 8192              # set explicitly; Ollama's default is smaller
+      think: false               # thinking mode is far too slow on CPU
+      temperature: 0.2
+      max_tokens: 700
+    embedding:
+      provider: ollama
+      model: qwen3-embedding:0.6b  # 639 MB, 32K context
+      base_url: http://localhost:11434
+      dimensions: 1024
+      max_input_tokens: 32768
+      # Qwen3-Embedding expects an instruction on queries (not on documents).
+      query_instruction: "Given a question about modular arithmetic hardware or Pollard rho research papers, retrieve passages that answer it"
+    # Small chunks keep the prompt short: CPU prompt processing, not the
+    # embedder, is the bottleneck (top_k x max_tokens ~ 3k tokens).
+    chunking:
+      target_tokens: 350
+      max_tokens: 500
+      min_lead_tokens: 80
+    retrieval:
+      top_k: 6
+      candidates: 30             # per retriever, before fusion and dedupe
+      hybrid: true               # vector + Postgres full-text, fused with RRF
+      dedupe_threshold: 0.6      # drop chunks whose text overlaps a better hit
+    server:
+      rate_limit_per_minute: 0   # 0 = off
+      global_rate_limit_per_minute: 0
+      max_question_chars: 1000
+      trusted_proxy_hops: 0      # no proxy: use the TCP peer address
+
+  # Hosted demo: web page + OpenRouter + Neon Postgres (pgvector).
+  cloud:
+    llm:
+      provider: openrouter
+      model: openai/gpt-6-luna
+      api_key_env: OPENROUTER_API_KEY
+      temperature: 0.2
+      max_tokens: 1200
+    embedding:
+      provider: openrouter
+      model: qwen/qwen3-embedding-8b  # 40K context, $0.01 per 1M tokens
+      api_key_env: OPENROUTER_API_KEY
+      dimensions: 1024                # Matryoshka-truncated from 4096
+      max_input_tokens: 40960
+      query_instruction: "Given a question about modular arithmetic hardware or Pollard rho research papers, retrieve passages that answer it"
+    chunking:
+      target_tokens: 700
+      max_tokens: 1000
+      min_lead_tokens: 120
+    retrieval:
+      top_k: 6
+      candidates: 30
+      hybrid: true
+      dedupe_threshold: 0.6
+    server:
+      rate_limit_per_minute: 6          # per client IP; protects the API budget
+      global_rate_limit_per_minute: 60  # all clients together; caps spend if IPs rotate
+      max_question_chars: 1000
+      # Proxies in front of the app that append to X-Forwarded-For (1 on
+      # Fly.io, Render, Railway, Cloud Run). 0 trusts only the TCP peer; use 0
+      # if the app is reachable without the proxy, or clients can forge it.
+      trusted_proxy_hops: 1

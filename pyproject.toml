@@ -1,0 +1,35 @@
+[project]
+name = "rag"
+version = "0.1.0"
+description = "Retrieval-augmented question answering over math-heavy research papers"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+    "pyyaml>=6.0",
+    "tiktoken>=0.8",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.uv]
+package = false
+# Only resolve releases that have been public for a while.
+exclude-newer = "2026-10-31T00:00:00Z"
+
+[tool.ruff]
+line-length = 132
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E731", "E741"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
