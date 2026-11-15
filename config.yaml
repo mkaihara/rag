@@ -1,0 +1,54 @@
+# RAG demo configuration. Pick a profile with RAG_PROFILE=local|cloud
+# (falls back to default_profile). Each profile builds its own index under
+# index/<profile>/, because chunk sizes and embedding models differ and
+# vectors from different embedding models are not comparable.
+default_profile: local
+
+profiles:
+  # Offline demo: `docker compose up` pulls Ollama + models, runs on CPU.
+  local:
+    llm:
+      provider: ollama
+      model: qwen3.5:4b          # ~3.3 GB Q4; use qwen3.5:2b on slow laptops
+      base_url: http://ollama:11434
+      num_ctx: 8192              # set explicitly; Ollama's default is smaller
+      think: false               # thinking mode is far too slow on CPU
+      temperature: 0.2
+    embedding:
+      provider: ollama
+      model: qwen3-embedding:0.6b  # 639 MB, 32K context
+      dimensions: 1024
+      max_input_tokens: 32768
+    # Small chunks keep the prompt short: CPU prompt processing, not the
+    # embedder, is the bottleneck (top_k x max_tokens ~ 3k tokens).
+    chunking:
+      target_tokens: 350
+      max_tokens: 500
+      min_lead_tokens: 80
+    retrieval:
+      top_k: 6
+    vector_store:
+      kind: pgvector
+      dsn_env: DATABASE_URL      # the postgres+pgvector compose service
+
+  # Hosted demo: web page + OpenRouter + Neon Postgres (pgvector).
+  cloud:
+    llm:
+      provider: openrouter
+      model: openai/gpt-6-luna
+      api_key_env: OPENROUTER_API_KEY
+      temperature: 0.2
+    embedding:
+      provider: openrouter
+      model: qwen/qwen3-embedding-8b  # 40K context, $0.01 per 1M tokens
+      dimensions: 1024                # Matryoshka-truncated from 4096
+      max_input_tokens: 40960
+    chunking:
+      target_tokens: 700
+      max_tokens: 1000
+      min_lead_tokens: 120
+    retrieval:
+      top_k: 6
+    vector_store:
+      kind: pgvector
+      dsn_env: DATABASE_URL      # Neon connection string
