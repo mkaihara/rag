@@ -1,10 +1,18 @@
 # Ask the Papers — RAG over math-heavy research papers
 
 Retrieval-augmented question answering over my publications on hardware
-algorithms for modular arithmetic (Montgomery multiplication, modular
-division, RNS bases) and Pollard's rho method for the elliptic-curve
-discrete logarithm problem. Answers cite the passages they come from, and
-formulas render as LaTeX.
+algorithms for modular arithmetic and on the security of RSA and elliptic
+curve cryptography. Answers cite the passages they come from, and formulas
+render as LaTeX.
+
+The corpus in [`data/`](data) is three documents, converted from their
+LaTeX sources to Markdown:
+
+| Document | Topic |
+|---|---|
+| `PhD_thesis/` — *Studies on Hardware Algorithms and Architectures for Modular Arithmetic* (Nagoya University, 2006) | Modular multiplication/division hardware: binary GCD and extended Euclidean algorithms, bipartite modular multiplication |
+| `ECC_RSA_KeySizes/` — *On the Security of 1024-bit RSA and 160-bit Elliptic Curve Cryptography* (EPFL, 2009) | Cost of factoring 1024-bit RSA and solving 160-bit ECDLP with Pollard rho on PlayStation 3 consoles |
+| `Pollard_rho_Flash_Informatique/` — *Number crunching on clusters at EPFL* (Flash Informatique, 2009) | Number field sieve on clusters; Pollard rho on the Cell processor |
 
 The same code runs in two configurations, selected with `RAG_PROFILE`:
 
@@ -28,7 +36,7 @@ docker compose up --build
 Then open <http://localhost:8000>. The first start downloads about 4 GB of
 models; the corpus vectors come from the committed embedding cache
 (`embeddings/local.jsonl.gz`), so indexing takes seconds instead of the
-~30 minutes a CPU needs to embed 584 chunks.
+~15 minutes a CPU needs to embed the 211 chunks.
 
 **Expect about 1.5–2.5 minutes per answer on CPU.** Measured in Docker on an
 Apple Silicon laptop (10 cores): retrieval under 1 s, then `qwen3.5:4b`
