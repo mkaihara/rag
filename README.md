@@ -154,7 +154,18 @@ uv run python -m rag.chunker data --profile local   # inspect chunks in index/lo
 uv run pytest
 # after changing data/ or chunking: rebuild the index, then refresh the cache
 docker compose run --rm -v "$PWD/embeddings:/app/embeddings" indexer python -m rag.ingest --export-cache
-DATABASE_URL=... uv run uvicorn rag.app:app --reload
+```
+
+To work on the app or the page, run it from source with auto-reload against
+the compose stack. The stack's Postgres and Ollama are published on
+`localhost:5433` and `localhost:11435` (local machine only), and port 8001
+avoids the container app on 8000:
+
+```sh
+docker compose up -d --build   # once: models, database and index
+DATABASE_URL=postgresql://rag:rag@localhost:5433/rag \
+OLLAMA_BASE_URL=http://localhost:11435 \
+uv run uvicorn rag.app:app --reload --port 8001
 ```
 
 | Path | Purpose |

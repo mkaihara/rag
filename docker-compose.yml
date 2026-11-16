@@ -35,6 +35,10 @@ services:
       OLLAMA_CONTEXT_LENGTH: "8192"
     volumes:
       - ollama:/root/.ollama
+    ports:
+      # For running the app from source (README, Development). Not 11434,
+      # so a native Ollama on the host can keep its default port.
+      - "127.0.0.1:11435:11434"
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s
@@ -65,6 +69,10 @@ services:
       POSTGRES_DB: rag
     volumes:
       - pgdata:/var/lib/postgresql/data
+    ports:
+      # For running the app from source (README, Development). Not 5432,
+      # so a Postgres already on the host doesn't clash.
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
       interval: 5s
