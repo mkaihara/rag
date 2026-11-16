@@ -5,14 +5,14 @@ algorithms for modular arithmetic and on the security of RSA and elliptic
 curve cryptography. Answers cite the passages they come from, and formulas
 render as LaTeX.
 
-The corpus in [`data/`](data) is three documents, converted from their
-LaTeX sources to Markdown:
+The corpus in [`data/`](data) is three documents converted to Markdown with
+`$...$` math:
 
-| Document | Topic |
-|---|---|
-| `PhD_thesis/` — *Studies on Hardware Algorithms and Architectures for Modular Arithmetic* (Nagoya University, 2006) | Modular multiplication/division hardware: binary GCD and extended Euclidean algorithms, bipartite modular multiplication |
-| `ECC_RSA_KeySizes/` — *On the Security of 1024-bit RSA and 160-bit Elliptic Curve Cryptography* (EPFL, 2009) | Cost of factoring 1024-bit RSA and solving 160-bit ECDLP with Pollard rho on PlayStation 3 consoles |
-| `Pollard_rho_Flash_Informatique/` — *Number crunching on clusters at EPFL* (Flash Informatique, 2009) | Number field sieve on clusters; Pollard rho on the Cell processor |
+| Document | Topic | Source |
+|---|---|---|
+| `PhD_thesis/` — *Studies on Hardware Algorithms and Architectures for Modular Arithmetic* (Nagoya University, 2006) | Modular multiplication/division hardware: binary GCD and extended Euclidean algorithms, bipartite modular multiplication | LaTeX, via `scripts/tex_to_md.py` |
+| `ECC_RSA_KeySizes/` — *On the Security of 1024-bit RSA and 160-bit Elliptic Curve Cryptography* (EPFL, 2009) | Cost of factoring 1024-bit RSA and solving 160-bit ECDLP with Pollard rho on PlayStation 3 consoles | PDF, via Claude |
+| `Pollard_rho_Flash_Informatique/` — *Number crunching on clusters at EPFL* (Flash Informatique, 2009) | Number field sieve on clusters; Pollard rho on the Cell processor | PDF, via Claude |
 
 The same code runs in two configurations, selected with `RAG_PROFILE`:
 
@@ -62,10 +62,12 @@ question ──► embed ──► vector search ─┐              │
          └─────────► keyword search ──┴─► RRF fusion ─► dedupe ─► top-k ─► LLM ─► streamed answer + sources
 ```
 
-1. **Source conversion.** The papers were written in LaTeX.
-   [`scripts/tex_to_md.py`](scripts/tex_to_md.py) converts them with pandoc
-   into Markdown with `$...$` math, numbered citations and resolved
-   cross-references, so no OCR is involved and formulas stay exact.
+1. **Source conversion.** The thesis was converted from its LaTeX source by
+   [`scripts/tex_to_md.py`](scripts/tex_to_md.py), which uses pandoc. Its
+   Markdown has `$...$` math, numbered citations and resolved
+   cross-references, so its formulas are exact. The two EPFL write-ups were
+   converted from their PDFs with Claude (claude.ai) into the same format,
+   with `$...$` math and HTML-comment page markers.
 2. **Section-aware chunking** ([`rag/chunker.py`](rag/chunker.py)). Chunks
    follow the heading structure and carry the document title, authors,
    section path, pages and a citation string. Reference lists are left out.
@@ -77,7 +79,8 @@ question ──► embed ──► vector search ─┐              │
    search over embeddings plus Postgres full-text search, merged with
    reciprocal rank fusion, so exact identifiers (`MQRTR`, `SD2`, `PS3`) are
    found even when embeddings blur them. Near-duplicate passages (the
-   theses reuse the papers' text) are dropped.
+   same text appearing in more than one place) are dropped, so they don't
+   take up room in the prompt.
 4. **Grounded generation.** The LLM answers only from the numbered sources
    and cites them as `[n]`; the page links each citation to its passage.
 
@@ -125,4 +128,4 @@ DATABASE_URL=... uv run uvicorn rag.app:app --reload
 | `rag/providers.py` | Ollama and OpenRouter clients |
 | `rag/store.py` | pgvector schema and queries |
 | `rag/app.py`, `rag/static/` | FastAPI streaming API and the web page |
-| `scripts/tex_to_md.py` | One-off LaTeX → Markdown conversion |
+| `scripts/tex_to_md.py` | One-off LaTeX → Markdown conversion (used for the thesis) |
