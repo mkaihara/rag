@@ -154,8 +154,23 @@ uv run python -m rag.chunker data --profile local   # inspect chunks in index/lo
 uv run pytest
 # after changing data/ or chunking: rebuild the index, then refresh the cache
 docker compose run --rm -v "$PWD/embeddings:/app/embeddings" indexer python -m rag.ingest --export-cache
-DATABASE_URL=... uv run uvicorn rag.app:app --reload
 ```
+
+To work on the app or the page, run it from source with auto-reload against
+the compose stack. The override file `docker-compose.dev.yml` publishes the
+stack's Postgres and Ollama on `localhost:5433` and `localhost:11435`, and
+port 8001 avoids the container app on 8000:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+DATABASE_URL=postgresql://rag:rag@localhost:5433/rag \
+OLLAMA_BASE_URL=http://localhost:11435 \
+uv run uvicorn rag.app:app --reload --port 8001
+```
+
+Ollama has no authentication, so close those ports when you're done
+(`docker compose up -d`): while open, other local programs, and a malicious
+web page through DNS rebinding, could use them.
 
 | Path | Purpose |
 |---|---|
