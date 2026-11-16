@@ -157,16 +157,20 @@ docker compose run --rm -v "$PWD/embeddings:/app/embeddings" indexer python -m r
 ```
 
 To work on the app or the page, run it from source with auto-reload against
-the compose stack. The stack's Postgres and Ollama are published on
-`localhost:5433` and `localhost:11435` (local machine only), and port 8001
-avoids the container app on 8000:
+the compose stack. The override file `docker-compose.dev.yml` publishes the
+stack's Postgres and Ollama on `localhost:5433` and `localhost:11435`, and
+port 8001 avoids the container app on 8000:
 
 ```sh
-docker compose up -d --build   # once: models, database and index
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 DATABASE_URL=postgresql://rag:rag@localhost:5433/rag \
 OLLAMA_BASE_URL=http://localhost:11435 \
 uv run uvicorn rag.app:app --reload --port 8001
 ```
+
+Ollama has no authentication, so close those ports when you're done
+(`docker compose up -d`): while open, other local programs, and a malicious
+web page through DNS rebinding, could use them.
 
 | Path | Purpose |
 |---|---|

@@ -1,0 +1,19 @@
+# Development override: publishes Postgres and Ollama on this machine so the
+# app can run from source (README, Development). Use it only while developing:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#
+# Ollama has no authentication, so while 11435 is open any local process,
+# and a malicious web page via DNS rebinding, can use it. Close the ports
+# again with plain `docker compose up -d`.
+#
+# Host ports 5433 and 11435 (not 5432 and 11434) leave room for a Postgres
+# or a native Ollama already running on the host.
+
+services:
+  db:
+    ports:
+      - "127.0.0.1:5433:5432"
+  ollama:
+    ports:
+      - "127.0.0.1:11435:11434"
