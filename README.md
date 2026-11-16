@@ -53,6 +53,45 @@ OLLAMA_BASE_URL=http://host.docker.internal:11434 docker compose up --build
 Other models: `LLM_MODEL=... docker compose up`. `qwen3.5:2b` is about twice
 as fast but noticeably less faithful to the sources in testing.
 
+### Platforms
+
+All the images are published for x86-64 and ARM64. The demo runs anywhere
+Docker Compose does, but it has only been tested on macOS (Apple Silicon).
+
+| | Docker | Notes |
+|---|---|---|
+| macOS | Docker Desktop | Raise its memory limit to about 8 GB (Settings → Resources). |
+| Windows | Docker Desktop (WSL2 backend) | WSL2 gets half the RAM by default; raise it in `.wslconfig` if that is under 8 GB. Use PowerShell syntax for environment variables (below). |
+| Linux | Docker Engine with the Compose plugin | No memory setting needed. |
+
+Containers run on CPU everywhere: the compose file does not pass a GPU
+through. To use a GPU, run Ollama natively (it supports Apple Silicon and
+NVIDIA/AMD GPUs) and point the containers at it with `OLLAMA_BASE_URL`, as
+in the Mac example above.
+
+**Windows (PowerShell).** Commands written `VAR=value docker compose up` in
+this README become:
+
+```powershell
+$env:OLLAMA_BASE_URL = "http://host.docker.internal:11434"
+docker compose up --build
+```
+
+**Linux with native Ollama.** Ollama listens only on `localhost` by default,
+which the containers cannot reach. Start it listening on all interfaces, and
+keep port 11434 closed to the network with a firewall:
+
+```sh
+OLLAMA_HOST=0.0.0.0 ollama serve
+OLLAMA_BASE_URL=http://host.docker.internal:11434 docker compose up --build
+```
+
+If Ollama runs as a systemd service, set `Environment="OLLAMA_HOST=0.0.0.0"`
+with `sudo systemctl edit ollama` instead.
+
+Line endings don't matter: a Windows checkout with CRLF line endings
+produces the same chunks, so the embedding cache still applies.
+
 ## How it works
 
 ```
