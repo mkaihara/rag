@@ -80,6 +80,7 @@ h2 { font: 600 12px/1 var(--sans); letter-spacing: .12em; text-transform: upperc
 @keyframes blink { 50% { opacity: 0; } }
 .thinking { color: var(--muted); font-style: italic; }
 .error { color: #b3261e; font: 14px var(--sans); }
+.note { color: var(--muted); font: italic 14px var(--sans); }
 
 a.cite {
   font: 600 11px/1 var(--sans); color: var(--accent); background: var(--accent-soft);

@@ -35,7 +35,7 @@ from pydantic import BaseModel
 
 from rag import store
 from rag.config import load_settings
-from rag.providers import Embedder, stream_chat
+from rag.providers import Embedder, Truncated, stream_chat
 from rag.retrieve import build_messages, retrieve
 
 log = logging.getLogger("rag")
@@ -236,7 +236,12 @@ async def ask(q: Question, request: Request) -> StreamingResponse:
                 }
             )
             t_first = None
+            truncated = False
             async for piece in stream_chat(settings.llm, build_messages(question, sources)):
+                if isinstance(piece, Truncated):
+                    truncated = True
+                    log.warning("answer stopped at the token limit (llm.max_tokens)")
+                    continue
                 t_first = t_first or time.monotonic()
                 yield _event({"type": "token", "text": piece})
             t_end = time.monotonic()
@@ -244,6 +249,7 @@ async def ask(q: Question, request: Request) -> StreamingResponse:
             yield _event(
                 {
                     "type": "done",
+                    "truncated": truncated,
                     "timings": {
                         "retrieval_ms": ms(t0, t_retrieval),
                         "first_token_ms": ms(t0, t_first),

@@ -53,7 +53,10 @@ profiles:
       retries: 1                 # retry once more if all fail before the first token
       api_key_env: OPENROUTER_API_KEY
       temperature: 0.2
-      max_tokens: 1200
+      # Both models reason before answering, and that hidden reasoning counts
+      # against max_tokens. Answering from six given passages needs little of it.
+      reasoning_effort: low
+      max_tokens: 4000
     embedding:
       provider: openrouter
       model: qwen/qwen3-embedding-8b  # 40K context, $0.01 per 1M tokens
