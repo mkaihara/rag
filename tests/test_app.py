@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from rag import app as app_module
+from rag.providers import Truncated
 
 
 def make_request(peer: str, forwarded: str | None = None) -> Request:
@@ -78,3 +79,19 @@ def test_errors_are_generic(monkeypatch, caplog):
     assert event["type"] == "error"
     assert "secret-host" not in event["message"]
     assert "secret-host" in caplog.text
+
+
+def test_done_event_reports_truncated_answer(monkeypatch):
+    async def no_sources(*args, **kwargs):
+        return []
+
+    async def cut_short(*args, **kwargs):
+        yield "The algorithm"
+        yield Truncated()
+
+    monkeypatch.setattr(app_module, "run_in_threadpool", no_sources)
+    monkeypatch.setattr(app_module, "stream_chat", cut_short)
+    response = TestClient(app_module.app).post("/api/ask", json={"question": "What is MQRTR?"})
+    events = [json.loads(line) for line in response.text.strip().splitlines()]
+    assert [e["text"] for e in events if e["type"] == "token"] == ["The algorithm"]
+    assert events[-1]["type"] == "done" and events[-1]["truncated"] is True

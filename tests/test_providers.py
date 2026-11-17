@@ -107,3 +107,48 @@ def test_error_event_inside_200_stream_is_retryable(monkeypatch):
         collect(cfg(retries=1))
     assert exc.value.retryable
     assert len(sent) == 2  # first attempt plus one retry
+
+
+def test_reasoning_effort_is_sent_and_excluded_from_the_stream():
+    body = openrouter_body(cfg(reasoning_effort="low", max_tokens=4000), MESSAGES)
+    assert body["reasoning"] == {"effort": "low", "exclude": True}
+    assert "reasoning_effort" not in body
+    assert "reasoning" not in openrouter_body(cfg(), MESSAGES)
+
+
+def mock_stream(monkeypatch, body: str, content_type="text/event-stream"):
+    def handler(request):
+        return providers.httpx.Response(200, text=body, headers={"content-type": content_type})
+
+    real_client = providers.httpx.AsyncClient
+    monkeypatch.setattr(
+        providers.httpx, "AsyncClient", lambda **kw: real_client(transport=providers.httpx.MockTransport(handler), **kw)
+    )
+
+
+def test_openrouter_length_limit_is_reported(monkeypatch):
+    mock_stream(
+        monkeypatch,
+        'data: {"choices": [{"delta": {"content": "The algorithm"}}]}\n\n'
+        'data: {"choices": [{"delta": {"content": " computes"}, "finish_reason": "length"}]}\n\n'
+        "data: [DONE]\n\n",
+    )
+    assert collect(cfg()) == ["The algorithm", " computes", providers.Truncated()]
+
+
+def test_openrouter_normal_stop_is_not_reported(monkeypatch):
+    mock_stream(
+        monkeypatch,
+        'data: {"choices": [{"delta": {"content": "Done."}, "finish_reason": "stop"}]}\n\ndata: [DONE]\n\n',
+    )
+    assert collect(cfg()) == ["Done."]
+
+
+def test_ollama_length_limit_is_reported(monkeypatch):
+    mock_stream(
+        monkeypatch,
+        '{"message": {"content": "Partial"}, "done": false}\n{"done": true, "done_reason": "length"}\n',
+        "application/x-ndjson",
+    )
+    ollama = ModelConfig("ollama", "qwen3.5:4b", "http://ollama:11434", None, {})
+    assert collect(ollama) == ["Partial", providers.Truncated()]

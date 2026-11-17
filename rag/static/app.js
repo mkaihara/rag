@@ -81,6 +81,7 @@ async function ask(question) {
 
   let answer = "";
   let pending = false;
+  let truncated = false;
   const paint = () => {
     pending = false;
     answerEl.innerHTML = render(answer, { cite: true });
@@ -117,6 +118,7 @@ async function ask(question) {
           answer += ev.text;
           if (!pending) { pending = true; requestAnimationFrame(paint); }
         } else if (ev.type === "done") {
+          truncated = Boolean(ev.truncated);
           const t = ev.timings;
           const s = (ms) => (ms / 1000).toFixed(1) + " s";
           $("timings").textContent =
@@ -127,6 +129,9 @@ async function ask(question) {
       }
     }
     paint();
+    if (truncated) {
+      answerEl.insertAdjacentHTML("beforeend", '<p class="note">The answer was cut off at the length limit.</p>');
+    }
   } catch (e) {
     answerEl.insertAdjacentHTML("beforeend", `<p class="error">Error: ${escapeHtml(e.message)}</p>`);
   } finally {

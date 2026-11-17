@@ -25,6 +25,14 @@ class ProviderError(RuntimeError):
         self.retryable = retryable  # overload or outage on the provider's side, worth another try
 
 
+class Truncated:
+    """Yielded by stream_chat after the last piece when the answer stopped at
+    the token limit (finish_reason / done_reason "length")."""
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, Truncated)
+
+
 def _retryable(status) -> bool:
     return isinstance(status, int) and (status == 429 or status >= 500)
 
@@ -93,11 +101,15 @@ def openrouter_body(cfg: ModelConfig, messages: list[dict[str, str]]) -> dict:
     for k in ("temperature", "max_tokens"):
         if k in cfg.options:
             body[k] = cfg.options[k]
+    if effort := cfg.options.get("reasoning_effort"):
+        # Hidden reasoning counts against max_tokens; keep it small and out of the stream.
+        body["reasoning"] = {"effort": effort, "exclude": True}
     return body
 
 
-async def stream_chat(cfg: ModelConfig, messages: list[dict[str, str]]) -> AsyncIterator[str]:
-    """Yield answer text pieces as the model generates them.
+async def stream_chat(cfg: ModelConfig, messages: list[dict[str, str]]) -> AsyncIterator[str | Truncated]:
+    """Yield answer text pieces as the model generates them, then a
+    Truncated() marker if the answer was cut at the token limit.
 
     A retryable provider error before the first piece is retried up to
     `retries` times (llm option, default 0). Once text has been yielded the
@@ -118,7 +130,7 @@ async def stream_chat(cfg: ModelConfig, messages: list[dict[str, str]]) -> Async
             await asyncio.sleep(RETRY_DELAY)
 
 
-async def _stream_chat_once(cfg: ModelConfig, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+async def _stream_chat_once(cfg: ModelConfig, messages: list[dict[str, str]]) -> AsyncIterator[str | Truncated]:
     opts = cfg.options
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         if cfg.provider == "ollama":
@@ -150,9 +162,12 @@ async def _stream_chat_once(cfg: ModelConfig, messages: list[dict[str, str]]) ->
                     if piece := event.get("message", {}).get("content"):
                         yield piece
                     if event.get("done"):
+                        if event.get("done_reason") == "length":
+                            yield Truncated()
                         return
         else:
             body = openrouter_body(cfg, messages)
+            truncated = False
             async with client.stream("POST", f"{cfg.base_url}/chat/completions", headers=_headers(cfg), json=body) as r:
                 if r.is_error:
                     await r.aread()
@@ -162,6 +177,8 @@ async def _stream_chat_once(cfg: ModelConfig, messages: list[dict[str, str]]) ->
                         continue  # blank lines and ": OPENROUTER PROCESSING" keep-alives
                     data = line[6:].strip()
                     if data == "[DONE]":
+                        if truncated:
+                            yield Truncated()
                         return
                     event = json.loads(data)
                     if "error" in event:  # sent inside a 200 stream, e.g. the provider is overloaded
@@ -171,3 +188,5 @@ async def _stream_chat_once(cfg: ModelConfig, messages: list[dict[str, str]]) ->
                     choices = event.get("choices") or [{}]
                     if piece := choices[0].get("delta", {}).get("content"):
                         yield piece
+                    if choices[0].get("finish_reason") == "length":
+                        truncated = True

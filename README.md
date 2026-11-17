@@ -151,6 +151,11 @@ app retries once (`llm.retries`) if every model failed before the first
 word of the answer. After the answer has started, an error is shown
 instead, so the page never mixes two answers.
 
+Both cloud models reason before answering, and that hidden reasoning
+counts against `llm.max_tokens`. The cloud profile keeps it small
+(`llm.reasoning_effort: low`) and allows 4,000 output tokens. If an answer
+still reaches the limit, the page says it was cut off.
+
 ## Development
 
 ```sh
