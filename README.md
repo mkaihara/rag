@@ -145,6 +145,12 @@ question ──► embed ──► vector search ─┐              │
    reachable without the proxy. Errors shown on the page are generic, with
    an id to find the details in the app log.
 
+When the LLM provider is overloaded, OpenRouter falls back to
+`llm.fallback_models` (`anthropic/claude-haiku-5.5`, same price), and the
+app retries once (`llm.retries`) if every model failed before the first
+word of the answer. After the answer has started, an error is shown
+instead, so the page never mixes two answers.
+
 ## Development
 
 ```sh
