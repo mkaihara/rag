@@ -47,6 +47,10 @@ profiles:
     llm:
       provider: openrouter
       model: openai/gpt-6-luna
+      # Tried in order by OpenRouter when the model above errors (outage,
+      # overload, rate limit). Same price per token as gpt-6-luna.
+      fallback_models: [anthropic/claude-haiku-5.5]
+      retries: 1                 # retry once more if all fail before the first token
       api_key_env: OPENROUTER_API_KEY
       temperature: 0.2
       max_tokens: 1200

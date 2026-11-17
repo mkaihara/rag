@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import math
 from collections.abc import AsyncIterator, Sequence
 
@@ -12,10 +14,19 @@ from rag.config import ModelConfig
 
 # CPU inference is slow: allow long reads, fail fast on connect.
 TIMEOUT = httpx.Timeout(connect=10, read=600, write=60, pool=10)
+RETRY_DELAY = 1.0  # seconds before retrying a chat request that failed before its first token
+
+log = logging.getLogger("rag")
 
 
 class ProviderError(RuntimeError):
-    pass
+    def __init__(self, message: str, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable  # overload or outage on the provider's side, worth another try
+
+
+def _retryable(status) -> bool:
+    return isinstance(status, int) and (status == 429 or status >= 500)
 
 
 def _headers(cfg: ModelConfig) -> dict[str, str]:
@@ -28,7 +39,7 @@ def _headers(cfg: ModelConfig) -> dict[str, str]:
 
 def _check(r: httpx.Response) -> None:
     if r.is_error:
-        raise ProviderError(f"{r.request.method} {r.request.url} -> {r.status_code}: {r.text[:500]}")
+        raise ProviderError(f"{r.request.method} {r.request.url} -> {r.status_code}: {r.text[:500]}", _retryable(r.status_code))
 
 
 def _normalize(v: Sequence[float], dims: int) -> list[float]:
@@ -71,8 +82,43 @@ class Embedder:
         return self.embed([text])[0]
 
 
+def openrouter_body(cfg: ModelConfig, messages: list[dict[str, str]]) -> dict:
+    """Chat request for OpenRouter. With `fallback_models`, OpenRouter tries
+    them in order when the primary model errors (outage, overload, rate limit)."""
+    body: dict = {"messages": messages, "stream": True}
+    if fallbacks := cfg.options.get("fallback_models"):
+        body["models"] = [cfg.model, *fallbacks]
+    else:
+        body["model"] = cfg.model
+    for k in ("temperature", "max_tokens"):
+        if k in cfg.options:
+            body[k] = cfg.options[k]
+    return body
+
+
 async def stream_chat(cfg: ModelConfig, messages: list[dict[str, str]]) -> AsyncIterator[str]:
-    """Yield answer text pieces as the model generates them."""
+    """Yield answer text pieces as the model generates them.
+
+    A retryable provider error before the first piece is retried up to
+    `retries` times (llm option, default 0). Once text has been yielded the
+    error is raised, so the page never shows two half-answers.
+    """
+    retries = int(cfg.options.get("retries", 0))
+    for attempt in range(retries + 1):
+        started = False
+        try:
+            async for piece in _stream_chat_once(cfg, messages):
+                started = True
+                yield piece
+            return
+        except ProviderError as e:
+            if started or not e.retryable or attempt == retries:
+                raise
+            log.warning("chat request failed before the first token, retrying: %s", e)
+            await asyncio.sleep(RETRY_DELAY)
+
+
+async def _stream_chat_once(cfg: ModelConfig, messages: list[dict[str, str]]) -> AsyncIterator[str]:
     opts = cfg.options
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         if cfg.provider == "ollama":
@@ -106,10 +152,7 @@ async def stream_chat(cfg: ModelConfig, messages: list[dict[str, str]]) -> Async
                     if event.get("done"):
                         return
         else:
-            body = {"model": cfg.model, "messages": messages, "stream": True}
-            for k in ("temperature", "max_tokens"):
-                if k in opts:
-                    body[k] = opts[k]
+            body = openrouter_body(cfg, messages)
             async with client.stream("POST", f"{cfg.base_url}/chat/completions", headers=_headers(cfg), json=body) as r:
                 if r.is_error:
                     await r.aread()
@@ -121,8 +164,10 @@ async def stream_chat(cfg: ModelConfig, messages: list[dict[str, str]]) -> Async
                     if data == "[DONE]":
                         return
                     event = json.loads(data)
-                    if "error" in event:
-                        raise ProviderError(str(event["error"]))
+                    if "error" in event:  # sent inside a 200 stream, e.g. the provider is overloaded
+                        err = event["error"]
+                        code = err.get("code") if isinstance(err, dict) else None
+                        raise ProviderError(str(err), _retryable(code))
                     choices = event.get("choices") or [{}]
                     if piece := choices[0].get("delta", {}).get("content"):
                         yield piece
