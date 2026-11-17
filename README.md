@@ -5,6 +5,9 @@ algorithms for modular arithmetic and on the security of RSA and elliptic
 curve cryptography. Answers cite the passages they come from, and formulas
 render as LaTeX.
 
+**Live demo:** <https://ask-the-papers.fly.dev> (the `cloud` profile below,
+on Fly.io and Neon).
+
 The corpus in [`data/`](data) is three documents converted to Markdown with
 `$...$` math:
 
