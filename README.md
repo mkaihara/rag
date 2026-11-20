@@ -126,6 +126,48 @@ question ──► embed ──► vector search ─┐              │
 4. **Grounded generation.** The LLM answers only from the numbered sources
    and cites them as `[n]`; the page links each citation to its passage.
 
+## Evaluation
+
+15 questions ([`eval/questions.yaml`](eval/questions.yaml)), five per paper,
+asked of both deployments on 2026-11-20. Thirteen have evidence in the
+papers. Two (q05, q10) have none, and the right answer is to say so.
+
+- A retrieved source counts as relevant when it contains one of the
+  question's verbatim evidence quotes.
+- Each `[n]` citation was checked against its sentence by
+  `anthropic/claude-sonnet-5.5`.
+- Answers were graded by hand.
+
+| | Cloud | Local |
+|---|---|---|
+| MRR@6 | 0.71 | 0.77 |
+| Recall@1 / @3 / @6 | 0.42 / 0.81 / 1.00 | 0.58 / 0.85 / 0.85 |
+| Citations supported / partly / unsupported | 18 / 8 / 2 of 28 | 50 / 13 / 5 of 68 |
+| Answers correct / partly correct | 11 / 2 of 13 | 6 / 4 of 13 |
+| Says when the papers don't answer | 2/2 | 2/2 |
+| Median time per answer | 2.8 s | 143 s |
+
+**Retrieval is about even.**
+- Local ranks the first relevant passage a little higher. Its chunks are about 350 tokens instead of about 700, so the matching text is less diluted.
+- Local misses q01 and q13 entirely. The cloud finds evidence for all 13 within the top 6.
+- With 13 questions, one or two questions of difference is noise.
+
+**The answers differ.**
+- The 4B local model gets 6 of 13 right, against 11 of 13 for the cloud model.
+- The local model cites more often, but both have the same share of unsupported citations (7%).
+
+To rerun the evaluation:
+
+```sh
+uv run python -m rag.evaluate ask --url URL --name NAME   # one deployment
+uv run python -m rag.evaluate judge eval/results/NAME.jsonl
+uv run python -m rag.evaluate report eval/results/*.judged.jsonl
+```
+- `judge` needs `OPENROUTER_API_KEY`.
+- Fill in the `**Grade:**` lines in `NAME.review.md` before running `report`.
+
+Full results, per-question ranks and the graded answers are in [`eval/results/`](eval/results/).
+
 ## Deploy the hosted version
 
 1. Create a Neon project and copy its connection string.
@@ -196,4 +238,5 @@ web page through DNS rebinding, could use them.
 | `rag/providers.py` | Ollama and OpenRouter clients |
 | `rag/store.py` | pgvector schema and queries |
 | `rag/app.py`, `rag/static/` | FastAPI streaming API and the web page |
+| `rag/evaluate.py`, `eval/` | Evaluation: questions, harness, results |
 | `scripts/tex_to_md.py` | One-off LaTeX → Markdown conversion (used for the thesis) |
