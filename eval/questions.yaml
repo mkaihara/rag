@@ -1,0 +1,172 @@
+# Evaluation questions: written by the author of the papers, reviewed
+# against data/. The same questions are asked of every deployment.
+#
+#   answer    reference answer, for grading by hand
+#   evidence  passages that answer the question. A retrieved source counts as
+#             relevant to an item when its text contains one of the item's
+#             quotes (after normalising case, whitespace, quotes and *_`).
+#             Quotes are verbatim from data/<doc>/*.md. Empty evidence means
+#             the papers do not answer the question: a good answer says so.
+#             Alternatives cover passages that answer the same point in
+#             another place (e.g. a definition and a side-by-side comparison).
+
+- id: q01
+  question: Why does Bipartite Modular Multiplication give the correct result?
+  answer: >-
+    In the KT-residue system the multiplier is split as $Y = Y_H r^{\alpha n} + Y_L$, and
+    $X \circledast Y = (X Y_H \bmod M + X Y_L r^{-\alpha n} \bmod M) \bmod M$, which equals
+    $X Y r^{-\alpha n} \bmod M$. The interleaved algorithm computes the $Y_H$ term and the
+    Montgomery algorithm the $Y_L$ term, in parallel.
+  evidence:
+    - quotes:
+        - "The correctness of the above formula can be seen using the following equality"
+        - "Let us consider the multiplier $Y$ split into two parts"
+
+- id: q02
+  question: >-
+    What is the difference between modular division based on the extended binary GCD algorithm
+    and modular division based on the extended Euclidean algorithm?
+  answer: >-
+    The extended Euclidean algorithm reduces A and B through integer divisions (quotient q,
+    A - qB); the extended binary GCD algorithm uses only halving of even values and
+    subtraction of odd ones. Both apply the same operations to U and V modulo M. In the
+    thesis the binary GCD divider is a radix-4/2 design (MQRTR) combined with Montgomery
+    multiplication; the Euclidean one improves Takagi's divider by sharing the modular
+    reduction hardware and also computes ordinary modular multiplication.
+  evidence:
+    - quotes: ["The Euclidean algorithm described below calculates the GCD of two integers through a series of integer divisions"]
+    - quotes: ["The extended Binary GCD algorithm [Knuth, 1998b] is another efficient way of calculating modular division"]
+
+- id: q03
+  question: What is the difference between the Montgomery multiplication algorithm and the interleaved modular multiplication algorithm?
+  answer: >-
+    Interleaved modular multiplication computes $X Y \bmod M$, processing the multiplier from
+    the most significant digit and estimating the quotient $\lfloor Z/M \rfloor$. Montgomery
+    multiplication works on M-residues of an odd modulus, computes $X Y R^{-1} \bmod M$ and
+    processes the multiplier from the least significant digit, choosing a multiple of M
+    that makes Z divisible by r, with no carry propagation in the quotient. The two are
+    symmetric.
+  evidence:
+    - quotes:
+        - "In the algorithm, the digits of the multiplier are processed from the most significant position first"
+        - "(Interleaved Mod. Mul. Algorithm) (Montgomery Algorithm)"
+        - "If we compare these two algorithms, we can see that the multiplier $Y$ is processed from the most significant position"
+    - quotes:
+        - "in contrast to the interleaved modular multiplication algorithm, the multiplier can be processed in the reverse order"
+        - "(Interleaved Mod. Mul. Algorithm) (Montgomery Algorithm)"
+        - "If we compare these two algorithms, we can see that the multiplier $Y$ is processed from the most significant position"
+
+- id: q04
+  question: How does addition work in the binary signed-digit (SD2) representation?
+  answer: >-
+    Digits are in $\{\bar 1, 0, 1\}$. For each position an interim sum $h_i$ and a carry $c_i$
+    are computed from $a_i, b_i$ and the preceding digits (Table 2.1), then
+    $s_i = h_i + c_{i-1}$. There is no carry propagation and all digits are computed in
+    parallel.
+  evidence:
+    - quotes: ["Addition of two SD2 numbers can be performed without carry propagation"]
+
+- id: q05
+  question: Can the multiplier be split into more than two parts in Bipartite Modular Multiplication?
+  answer: >-
+    Not covered: the thesis only describes splitting the multiplier into two parts, $Y_H$
+    and $Y_L$ (possibly of unequal length via $\alpha$). A good answer says the sources do
+    not discuss more parts.
+  evidence: []
+
+- id: q06
+  question: How many PlayStation 3 consoles did LACAL use to solve the 112-bit prime field ECDLP?
+  answer: >-
+    More than 215 PS3s (about 1300 SPUs). It took about half a year and was completed on
+    July 8, 2009.
+  evidence:
+    - quotes:
+        - "were run on LACAL’s cluster of more than 215 PS3s"
+        - "On 1300 SPUs this resulted in more than half a million parallel walks"
+
+- id: q07
+  question: What is the birthday paradox, and why does it matter for Pollard's rho method?
+  answer: >-
+    23 randomly picked people give a better than 50% chance that two share a birthday.
+    Drawing with replacement from N objects, a repeat is expected after about
+    $\sqrt{\pi N/2}$ draws, so Pollard's rho expects a collision after about
+    $\sqrt{\pi q/2}$ steps.
+  evidence:
+    - quotes: ["This is called the birthday paradox, not because it is a paradox"]
+    - quotes: ["Because of the birthday paradox, after $\\sqrt{\\pi q/2}$ pairs a duplicate may be expected"]
+
+- id: q08
+  question: How does Pollard's rho method compute discrete logarithms?
+  answer: >-
+    It looks at $g^r y^s$ for random pairs $(r, s)$ (in practice a pseudo-random walk). By
+    the birthday paradox a duplicate $g^r y^s = g^u y^v$ appears after about
+    $\sqrt{\pi q/2}$ steps, giving $x = (r-u)/(v-s) \bmod q$. It parallelises with
+    distinguished points.
+  evidence:
+    - quotes:
+        - "looks at $g^r y^s$ in $G$ for random pairs $(r,s)$ of integers"
+        - "Pollard’s rho method was designed to calculate discrete logarithms in multiplicative groups of prime fields"
+
+- id: q09
+  question: Did LACAL solve the 160-bit prime field ECDLP?
+  answer: >-
+    No. The paper estimates about $2.5 \cdot 10^9$ PS3 years (a year on 2.5 billion
+    devices) and considers an open-community attack even by 2020 very unlikely. LACAL
+    solved the 112-bit one.
+  evidence:
+    - quotes:
+        - "a successful open community attack on 160-bit ECC even by the year 2020 must be considered very unlikely"
+        - "PS3 years to crack 160-bit ECC"
+
+- id: q10
+  question: Was the 112-bit prime field ECDLP computation supported by Sony?
+  answer: >-
+    Not stated: neither paper says Sony supported it. The acknowledged support is the
+    Swiss National Science Foundation, EPFL DIT and the EU ICT program ECRYPT II.
+  evidence: []
+
+- id: q11
+  question: In which year was a 512-bit RSA modulus first factored?
+  answer: 1999, with the Number Field Sieve.
+  evidence:
+    - quotes:
+        - "1999: First factorization of a 512-bit RSA modulus"
+        - "The first public announcement of the NFS-factorization of a 512-bit RSA modulus was in 1999"
+
+- id: q12
+  question: How does cracking 160-bit ECC compare with cracking 1024-bit RSA?
+  answer: >-
+    Cracking 160-bit ECC is at least three orders of magnitude harder. 160-bit ECC gives
+    about 86-87 bits of security, 1024-bit RSA about 76 bits.
+  evidence:
+    - quotes: ["cracking 160-bit ECC is at least three orders of magnitude harder than cracking 1024-bit RSA"]
+    - quotes: ["we find that 160-bit ECC provides between 86 and 87 bits of security"]
+
+- id: q13
+  question: Can the PlayStation 3's graphics card be used to solve the ECDLP?
+  answer: >-
+    Not at the time: with the hypervisor version then current it was not accessible to
+    applications other than games. If it were accessible it could double a PS3's
+    effectiveness.
+  evidence:
+    - quotes: ["not accessible to applications other than gaming"]
+
+- id: q14
+  question: What is the most effective published method for factoring an RSA modulus?
+  answer: The Number Field Sieve (NFS).
+  evidence:
+    - quotes:
+        - "The most effective method that has been published, the Number Field Sieve"
+        - "For RSA moduli it is better to use NFS"
+
+- id: q15
+  question: >-
+    Did the authors trade inversions for multiplications when computing point addition in
+    affine Weierstrass representation?
+  answer: >-
+    Yes. With simultaneous inversion over N parallel walks, one inversion is shared at the
+    cost of about 3 extra multiplications per walk, so a point addition takes four
+    multiplications, one squaring and 1/N of an inversion for x, plus one multiplication
+    for y. On the SPU they used N = 400.
+  evidence:
+    - quotes: ["using affine Weierstrass representation, point addition takes four multiplications, one squaring"]
