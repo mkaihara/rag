@@ -126,6 +126,11 @@ question ──► embed ──► vector search ─┐              │
 4. **Grounded generation.** The LLM answers only from the numbered sources
    and cites them as `[n]`; the page links each citation to its passage.
 
+Retrieval and the answer prompt are tuned to this corpus: the embedding
+query instruction (`embedding.query_instruction` in `config.yaml`) and the
+system prompt (`SYSTEM_PROMPT` in `rag/retrieve.py`) both name its
+cryptography topics, so other documents would need both edited.
+
 ## Evaluation
 
 15 questions ([`eval/questions.yaml`](eval/questions.yaml)), five per paper,
