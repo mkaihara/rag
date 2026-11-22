@@ -39,9 +39,14 @@ async function loadInfo() {
     const r = await fetch("/api/info");
     const info = await r.json();
     const idx = info.index;
+    const row = (label, value) => `<dt>${label}</dt><dd>${value}</dd>`;
     $("meta").innerHTML = idx
-      ? `Profile <code>${escapeHtml(info.profile)}</code> · LLM <code>${escapeHtml(info.llm)}</code> · ` +
-        `embeddings <code>${escapeHtml(info.embedding)}</code> · ${idx.chunks} chunks from ${info.documents.length} documents`
+      ? "<dl>" +
+        row("Profile", `<code>${escapeHtml(info.profile)}</code>`) +
+        row("LLM", `<code>${escapeHtml(info.llm)}</code>`) +
+        row("Embeddings", `<code>${escapeHtml(info.embedding)}</code>`) +
+        row("Index", `${idx.chunks} chunks from ${info.documents.length} documents`) +
+        "</dl>"
       : "The index has not been built yet — run the indexer.";
     $("documents").innerHTML = info.documents
       .map((d) => `<li>${escapeHtml(d.title)} <span class="authors">— ${escapeHtml(d.authors.join(", "))} · ${d.chunks} chunks</span></li>`)
