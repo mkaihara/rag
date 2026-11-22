@@ -69,6 +69,22 @@ function renderSources(sources) {
     .join("");
 }
 
+// On desktop widths, shrink a display formula that is slightly too wide for
+// the answer column (down to 75%) so it shows whole. Narrower screens keep
+// full-size math that scrolls sideways inside its own box.
+const WIDE = matchMedia("(min-width: 861px)");
+function fitFormulas() {
+  for (const d of $("answer").querySelectorAll(".katex-display")) {
+    d.style.fontSize = "";
+    if (!WIDE.matches) continue;
+    const ratio = d.clientWidth / d.scrollWidth;
+    if (ratio < 1) d.style.fontSize = `${Math.max(0.75, ratio * 0.98)}em`;
+  }
+}
+window.addEventListener("resize", fitFormulas);
+// KaTeX fonts load when first used, which changes the width of the math.
+document.fonts?.addEventListener("loadingdone", fitFormulas);
+
 async function ask(question) {
   const answerEl = $("answer");
   $("result").hidden = false;
@@ -85,6 +101,7 @@ async function ask(question) {
   const paint = () => {
     pending = false;
     answerEl.innerHTML = render(answer, { cite: true });
+    fitFormulas();
   };
 
   try {
