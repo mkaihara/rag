@@ -143,6 +143,22 @@ async function ask(question) {
 // ---------------------------------------------------------------------------
 // Wiring
 
+// Grow the question box to fit its text, or its placeholder when empty: at
+// phone widths the placeholder wraps to three lines and two rows cut it off.
+function fitQuestion() {
+  const t = $("question");
+  const empty = !t.value;
+  if (empty) t.value = t.placeholder;
+  t.style.height = "auto";
+  const borders = t.offsetHeight - t.clientHeight;
+  t.style.height = `${t.scrollHeight + borders}px`;
+  if (empty) t.value = "";
+}
+$("question").addEventListener("input", fitQuestion);
+window.addEventListener("resize", fitQuestion);
+document.fonts?.ready.then(fitQuestion);
+fitQuestion();
+
 $("ask").addEventListener("submit", (e) => {
   e.preventDefault();
   const q = $("question").value.trim();
@@ -157,6 +173,7 @@ $("question").addEventListener("keydown", (e) => {
 $("examples").addEventListener("click", (e) => {
   if (e.target.tagName !== "BUTTON") return;
   $("question").value = e.target.textContent;
+  fitQuestion();
   $("ask").requestSubmit();
 });
 $("answer").addEventListener("click", (e) => {
