@@ -1,5 +1,7 @@
 # Ask the Papers — RAG over math-heavy research papers
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Retrieval-augmented question answering over my publications on hardware
 algorithms for modular arithmetic and on the security of RSA and elliptic
 curve cryptography. Answers cite the passages they come from, and formulas
@@ -245,3 +247,17 @@ web page through DNS rebinding, could use them.
 | `rag/app.py`, `rag/static/` | FastAPI streaming API and the web page |
 | `rag/evaluate.py`, `eval/` | Evaluation: questions, harness, results |
 | `scripts/tex_to_md.py` | One-off LaTeX → Markdown conversion (used for the thesis) |
+
+## License
+
+Code: [MIT](LICENSE). The document corpus in [`data/`](data) and the text
+chunks in [`embeddings/`](embeddings) are included for demonstration only and
+are **not** covered by this license. They are converted versions of published
+academic works:
+
+- `thesis.md` © Marcelo E. Kaihara (doctoral dissertation, Nagoya University, 2006)
+- `sec_rsa_ecc.md` © the authors, J.W. Bos, M.E. Kaihara, T. Kleinjung,
+  A.K. Lenstra, P.L. Montgomery (Cryptology ePrint Archive, Report 2009/389,
+  <https://eprint.iacr.org/2009/389>)
+- `number-crunching-on-clusters-at-epfl.md` © the authors, EPFL (Flash
+  informatique, FI spécial HPC, no. 8, 27 October 2009)
