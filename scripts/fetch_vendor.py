@@ -18,8 +18,8 @@ VENDOR = Path(__file__).resolve().parent.parent / "rag" / "static" / "vendor"
 PACKAGES = [
     # (tarball URL, sha256, {path in tarball (prefix): destination under vendor/})
     (
-        "https://registry.npmjs.org/katex/-/katex-0.16.11.tgz",
-        "8c5494c5f7d8e8bf73ff3fe64d4bd09a340e4878b7eec9bbd9ef8d8f3e24193f",
+        "https://registry.npmjs.org/katex/-/katex-0.19.1.tgz",
+        "24da5a599eb2fcede2e270b99a6ff48bca816beecc95feeb84e8cccbd1bb34fd",
         {
             "package/dist/katex.min.js": "katex/katex.min.js",
             "package/dist/katex.min.css": "katex/katex.min.css",
@@ -32,8 +32,8 @@ PACKAGES = [
         {"package/marked.min.js": "marked.min.js"},
     ),
     (
-        "https://registry.npmjs.org/dompurify/-/dompurify-3.1.6.tgz",
-        "385981ebd0366fcce5313c1801019af737260ca29fe60d38a97f956d5ff1013a",
+        "https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz",
+        "056cbdae276897208b88c21d1d779adfa09ad7be488a2f510a28e900d3bbffe7",
         {"package/dist/purify.min.js": "purify.min.js"},
     ),
 ]

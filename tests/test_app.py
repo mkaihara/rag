@@ -95,3 +95,67 @@ def test_done_event_reports_truncated_answer(monkeypatch):
     events = [json.loads(line) for line in response.text.strip().splitlines()]
     assert [e["text"] for e in events if e["type"] == "token"] == ["The algorithm"]
     assert events[-1]["type"] == "done" and events[-1]["truncated"] is True
+
+
+# --------------------------------------------------------------------------
+# Hardening: request size limit, security headers, no API docs, cached info
+
+
+def test_oversized_body_is_refused_before_reading():
+    body = json.dumps({"question": "x" * (app_module.MAX_BODY_BYTES + 1)})
+    response = TestClient(app_module.app).post("/api/ask", content=body, headers={"Content-Type": "application/json"})
+    assert response.status_code == 413
+
+
+def test_oversized_chunked_body_is_refused():
+    def chunks():  # a generator body is sent chunked, without Content-Length
+        yield b'{"question": "'
+        for _ in range(10):
+            yield b"x" * 4096
+        yield b'"}'
+
+    response = TestClient(app_module.app).post("/api/ask", content=chunks(), headers={"Content-Type": "application/json"})
+    assert response.status_code == 413
+
+
+def test_rejected_questions_count_toward_the_rate_limit(server_settings):
+    server_settings["rate_limit_per_minute"] = 2
+    client = TestClient(app_module.app)
+    statuses = [client.post("/api/ask", json={"question": "x" * 5000}).status_code for _ in range(3)]
+    assert statuses == [400, 400, 429]
+
+
+def test_security_headers_on_page_and_api(monkeypatch):
+    monkeypatch.setattr(app_module, "_info", lambda: {"ok": True})
+    app_module._cache.clear()
+    client = TestClient(app_module.app)
+    for path in ("/", "/static/app.js", "/api/info"):
+        headers = client.get(path).headers
+        assert "script-src 'self'" in headers["content-security-policy"], path
+        assert headers["x-content-type-options"] == "nosniff"
+        assert headers["x-frame-options"] == "DENY"
+    too_large = client.post("/api/ask", content=b"x" * (app_module.MAX_BODY_BYTES + 1))
+    assert "content-security-policy" in too_large.headers
+
+
+def test_api_docs_are_not_served():
+    client = TestClient(app_module.app)
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404, path
+
+
+def test_info_and_health_are_cached(monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module, "_info", lambda: calls.append("info") or {"profile": "test"})
+    monkeypatch.setattr(app_module, "_health", lambda: calls.append("health") or {"ok": True})
+    clock = iter([0.0, 1.0, 0.0, 1.0, app_module.INFO_TTL + 1, app_module.HEALTH_TTL + 1])
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(clock))
+    app_module._cache.clear()
+    for _ in range(2):
+        assert app_module.info() == {"profile": "test"}
+        assert app_module.health() == {"ok": True}
+    assert calls == ["info", "health"]
+    app_module.info()
+    app_module.health()
+    assert calls == ["info", "health", "info", "health"]
+    app_module._cache.clear()
