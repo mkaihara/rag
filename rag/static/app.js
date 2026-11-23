@@ -5,10 +5,34 @@ const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&l
 
 // ---------------------------------------------------------------------------
 // Markdown + LaTeX rendering. Math is cut out before Markdown parsing (so
-// underscores and asterisks inside formulas survive), the Markdown HTML is
-// sanitized, then citations are linked and KaTeX output is put back.
+// underscores and asterisks inside formulas survive) and the Markdown HTML is
+// sanitized. Only then are citations linked and KaTeX output put back, and
+// only inside text nodes: splicing into the HTML string could land markup
+// inside an attribute, after the sanitizer has already looked at it.
 
 const MATH = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|(?<![\\$\w])\$(?!\s)((?:\\\$|[^$\n])+?)(?<!\s)\$(?![\w$])/g;
+const TOKENS = /@@MATH(\d+)@@|\[(\d{1,2})\]/g;
+
+function mathNode({ tex, display }) {
+  const t = document.createElement("template");
+  try {
+    t.innerHTML = katex.renderToString(tex, { displayMode: display, throwOnError: false, strict: "ignore", trust: false });
+  } catch {
+    const code = document.createElement("code");
+    code.textContent = tex;
+    t.content.append(code);
+  }
+  return t.content;
+}
+
+function citeNode(n) {
+  const a = document.createElement("a");
+  a.className = "cite";
+  a.href = `#src-${n}`;
+  a.dataset.n = n;
+  a.textContent = n;
+  return a;
+}
 
 function render(text, { cite = false } = {}) {
   const math = [];
@@ -17,18 +41,27 @@ function render(text, { cite = false } = {}) {
     math.push({ tex: dd ?? sq ?? rd ?? inl, display });
     return `@@MATH${math.length - 1}@@`;
   });
-  let html = DOMPurify.sanitize(marked.parse(stripped, { breaks: false, gfm: true }));
-  if (cite) {
-    html = html.replace(/\[(\d{1,2})\]/g, (m, n) => `<a class="cite" href="#src-${n}" data-n="${n}">${n}</a>`);
-  }
-  return html.replace(/@@MATH(\d+)@@/g, (m, i) => {
-    const { tex, display } = math[+i];
-    try {
-      return katex.renderToString(tex, { displayMode: display, throwOnError: false, strict: "ignore", trust: false });
-    } catch {
-      return `<code>${escapeHtml(tex)}</code>`;
+  const t = document.createElement("template");
+  t.innerHTML = DOMPurify.sanitize(marked.parse(stripped, { breaks: false, gfm: true }));
+  const walker = document.createTreeWalker(t.content, NodeFilter.SHOW_TEXT);
+  const texts = [];
+  while (walker.nextNode()) texts.push(walker.currentNode);
+  for (const node of texts) {
+    const s = node.data;
+    const parts = [];
+    let last = 0;
+    for (const m of s.matchAll(TOKENS)) {
+      const [whole, i, n] = m;
+      const replacement = i !== undefined ? math[+i] && mathNode(math[+i]) : cite && citeNode(n);
+      if (!replacement) continue; // unknown placeholder, or [n] where citations are off: keep the text
+      parts.push(s.slice(last, m.index), replacement);
+      last = m.index + whole.length;
     }
-  });
+    if (!parts.length) continue;
+    parts.push(s.slice(last));
+    node.replaceWith(...parts);
+  }
+  return t.innerHTML;
 }
 
 // ---------------------------------------------------------------------------

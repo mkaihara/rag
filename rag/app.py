@@ -83,8 +83,86 @@ async def warm_up_models() -> None:
         log.warning("model warm-up failed: %s", e)
 
 
-app = FastAPI(title="Research papers RAG", lifespan=lifespan)
+# No /docs, /redoc or /openapi.json: the API is for this page only.
+app = FastAPI(title="Research papers RAG", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+# --------------------------------------------------------------------------
+# Request size limit and security headers, as plain ASGI middleware (it
+# leaves the streamed answer alone).
+
+MAX_BODY_BYTES = 16 * 1024  # a 1000-character question is at most ~4 KB of JSON
+
+SECURITY_HEADERS = [
+    (
+        b"content-security-policy",
+        b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        b"font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
+        b"frame-ancestors 'none'",
+    ),  # 'unsafe-inline' styles: KaTeX positions symbols with style attributes
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"strict-transport-security", b"max-age=31536000"),  # browsers ignore it over plain http
+]
+
+
+class BodyTooLarge(HTTPException):
+    # An HTTPException, so FastAPI passes it through as a 413 instead of
+    # turning it into "error parsing the body" when it surfaces mid-read.
+    def __init__(self):
+        super().__init__(413, "Request too large")
+
+
+class Hardening:
+    """Refuse request bodies over MAX_BODY_BYTES with 413 before they are read
+    into memory, and add SECURITY_HEADERS to every response."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": [*message.get("headers", []), *SECURITY_HEADERS]}
+            await send(message)
+
+        async def reject():
+            body = b'{"detail":"Request too large"}'
+            await send_with_headers(
+                {
+                    "type": "http.response.start",
+                    "status": 413,
+                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+
+        length = dict(scope["headers"]).get(b"content-length")
+        if length is not None and (not length.isdigit() or int(length) > MAX_BODY_BYTES):
+            return await reject()
+
+        received = 0
+
+        async def limited_receive():  # chunked uploads have no Content-Length
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > MAX_BODY_BYTES:
+                    raise BodyTooLarge()
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send_with_headers)
+        except BodyTooLarge:  # raised while the body is read, before any response
+            await reject()
+
+
+app.add_middleware(Hardening)
 
 # --------------------------------------------------------------------------
 # Rate limits: per client and for the whole app, over a sliding one-minute
@@ -165,8 +243,29 @@ def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
 
 
+# /api/info and /api/health answer from a short-lived cache, so requests in
+# a loop cannot keep the serverless database awake or hold its connections.
+INFO_TTL = 300.0
+HEALTH_TTL = 10.0
+_cache: dict[str, tuple[float, dict]] = {}
+
+
+def cached(key: str, ttl: float, compute) -> dict:
+    now = time.monotonic()
+    hit = _cache.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    value = compute()
+    _cache[key] = (now, value)
+    return value
+
+
 @app.get("/api/info")
 def info() -> dict:
+    return cached("info", INFO_TTL, _info)
+
+
+def _info() -> dict:
     with state["pool"].connection() as conn:
         status = store.index_status(conn, settings.profile)
         docs = (
@@ -189,6 +288,10 @@ def info() -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
+    return cached("health", HEALTH_TTL, _health)
+
+
+def _health() -> dict:
     with state["pool"].connection() as conn:
         conn.execute("SELECT 1")
     return {"ok": True}
@@ -204,13 +307,13 @@ def _event(obj: dict) -> bytes:
 
 @app.post("/api/ask")
 async def ask(q: Question, request: Request) -> StreamingResponse:
+    check_rate_limit(request)  # first, so rejected questions count too
     question = q.question.strip()
     max_chars = int(settings.server.get("max_question_chars", 1000))
     if not question:
         raise HTTPException(400, "Empty question")
     if len(question) > max_chars:
         raise HTTPException(400, f"Question too long (max {max_chars} characters)")
-    check_rate_limit(request)
 
     async def events():
         t0 = time.monotonic()
