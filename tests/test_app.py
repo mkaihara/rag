@@ -9,16 +9,20 @@ from rag import app as app_module
 from rag.providers import Truncated
 
 
-def make_request(peer: str, forwarded: str | None = None) -> Request:
+def make_request(peer: str, forwarded: str | None = None, fly_client_ip: str | None = None) -> Request:
     headers = [(b"x-forwarded-for", forwarded.encode())] if forwarded else []
+    if fly_client_ip is not None:
+        headers.append((b"fly-client-ip", fly_client_ip.encode()))
     return Request({"type": "http", "method": "POST", "path": "/api/ask", "headers": headers, "client": (peer, 1234)})
 
 
 @pytest.fixture(autouse=True)
 def server_settings(monkeypatch):
     monkeypatch.delenv("TRUSTED_PROXY_HOPS", raising=False)
+    monkeypatch.delenv("CLIENT_IP_HEADER", raising=False)
     server = app_module.settings.server
-    for key, value in {"rate_limit_per_minute": 0, "global_rate_limit_per_minute": 0, "trusted_proxy_hops": 0}.items():
+    defaults = {"rate_limit_per_minute": 0, "global_rate_limit_per_minute": 0, "trusted_proxy_hops": 0, "client_ip_header": ""}
+    for key, value in defaults.items():
         monkeypatch.setitem(server, key, value)
     app_module._hits.clear()
     yield server
@@ -36,6 +40,46 @@ def test_forwarded_header_uses_entry_added_by_trusted_proxy(server_settings):
     server_settings["trusted_proxy_hops"] = 2
     assert app_module.client_ip(make_request("10.0.0.5", "6.6.6.6, 1.2.3.4, 10.0.0.9")) == "1.2.3.4"
     assert app_module.client_ip(make_request("10.0.0.5")) == "10.0.0.5"
+
+
+def test_client_ip_header_is_used_when_configured(server_settings):
+    # Fly.io: X-Forwarded-For is "<client>, <app's own IP>"; Fly-Client-IP is the client.
+    server_settings["client_ip_header"] = "Fly-Client-IP"
+    assert app_module.client_ip(make_request("172.16.0.2", "1.2.3.4, 66.241.125.12", "1.2.3.4")) == "1.2.3.4"
+    assert app_module.client_ip(make_request("172.16.0.2", "5.6.7.8, 66.241.125.12", "5.6.7.8")) == "5.6.7.8"
+    # missing or empty header: fall back to the TCP peer
+    assert app_module.client_ip(make_request("172.16.0.2", "1.2.3.4, 66.241.125.12")) == "172.16.0.2"
+    assert app_module.client_ip(make_request("172.16.0.2", fly_client_ip=" ")) == "172.16.0.2"
+
+
+def test_client_ip_header_env_overrides_config(server_settings, monkeypatch):
+    server_settings["client_ip_header"] = "fly-client-ip"
+    monkeypatch.setenv("CLIENT_IP_HEADER", "")  # empty turns the header off
+    assert app_module.client_ip(make_request("10.0.0.5", fly_client_ip="1.2.3.4")) == "10.0.0.5"
+    monkeypatch.setenv("CLIENT_IP_HEADER", "fly-client-ip")
+    server_settings["client_ip_header"] = ""
+    assert app_module.client_ip(make_request("10.0.0.5", fly_client_ip="1.2.3.4")) == "1.2.3.4"
+
+
+def test_fly_visitors_get_separate_rate_limits(server_settings):
+    # The bug this replaces: with trusted_proxy_hops 1 on Fly.io every visitor
+    # resolved to the app's own IP and shared one bucket.
+    server_settings["rate_limit_per_minute"] = 2
+    server_settings["client_ip_header"] = "fly-client-ip"
+    for _ in range(2):
+        app_module.check_rate_limit(make_request("172.16.0.2", "1.2.3.4, 66.241.125.12", "1.2.3.4"))
+    app_module.check_rate_limit(make_request("172.16.0.2", "5.6.7.8, 66.241.125.12", "5.6.7.8"))
+    with pytest.raises(HTTPException) as e:
+        app_module.check_rate_limit(make_request("172.16.0.2", "9.9.9.9, 1.2.3.4, 66.241.125.12", "1.2.3.4"))
+    assert e.value.status_code == 429
+
+
+def test_cloud_profile_reads_fly_client_ip():
+    from rag.config import load_settings
+
+    server = load_settings("cloud").server
+    assert server["client_ip_header"] == "fly-client-ip"
+    assert server["trusted_proxy_hops"] == 0
 
 
 def test_forged_forwarded_header_does_not_bypass_limit(server_settings):
