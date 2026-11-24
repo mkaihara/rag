@@ -30,6 +30,7 @@ RUN useradd --system --no-create-home app
 USER app
 
 EXPOSE 8000
-# Hosting platforms pass the port in $PORT. The app reads X-Forwarded-For
-# itself (server.trusted_proxy_hops), so uvicorn's own handling is off.
+# Hosting platforms pass the port in $PORT. The app picks the client address
+# itself (server.client_ip_header / trusted_proxy_hops), so uvicorn's own
+# X-Forwarded-For handling is off.
 CMD ["sh", "-c", "exec uvicorn rag.app:app --host 0.0.0.0 --port ${PORT:-8000} --no-proxy-headers"]

@@ -191,11 +191,14 @@ Full results, per-question ranks and the graded answers are in [`eval/results/`]
    `OPENROUTER_API_KEY` set. The app listens on `$PORT` (default 8000) and
    rate-limits each client IP (`server.rate_limit_per_minute`) and all
    clients together (`server.global_rate_limit_per_minute`).
-   Client IPs come from `X-Forwarded-For` only as far as
-   `server.trusted_proxy_hops` (default 1, one platform proxy) allows; set
-   `TRUSTED_PROXY_HOPS` to match your host, or 0 if the container is
-   reachable without the proxy. Errors shown on the page are generic, with
-   an id to find the details in the app log.
+   The client IP comes from the header in `server.client_ip_header`
+   (`fly-client-ip` in the `cloud` profile, which the Fly.io proxy sets). On
+   other hosts set `CLIENT_IP_HEADER` to the header their proxy overwrites,
+   or set it to an empty value and `TRUSTED_PROXY_HOPS` to the number of
+   proxies that append to `X-Forwarded-For`. With both off, the TCP peer is
+   used; do that if the container is reachable without the proxy. Errors
+   shown on the page are generic, with an id to find the details in the app
+   log.
 
 When the LLM provider is overloaded, OpenRouter falls back to
 `llm.fallback_models` (`anthropic/claude-haiku-5.5`, same price), and the

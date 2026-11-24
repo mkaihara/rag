@@ -11,6 +11,7 @@ docker compose and in production:
     OPENROUTER_API_KEY key for providers "openrouter" (name set by api_key_env)
     LLM_MODEL          replaces the profile's llm.model
     EMBED_MODEL        replaces the profile's embedding.model
+    CLIENT_IP_HEADER   replaces server.client_ip_header (read in rag.app)
     TRUSTED_PROXY_HOPS replaces server.trusted_proxy_hops (read in rag.app)
 """
 

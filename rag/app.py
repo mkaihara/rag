@@ -8,9 +8,11 @@ POST /api/ask {"question": "..."} streams newline-delimited JSON events:
     {"type": "done", "timings": {...}}       retrieval / first-token / total ms
     {"type": "error", "message": "..."}      if anything fails (generic; details in the log)
 
-Behind a hosting platform's proxy, set TRUSTED_PROXY_HOPS (or
-server.trusted_proxy_hops) to the number of proxies in front of the app so
-rate limits apply to the real client address.
+Behind a hosting platform's proxy, rate limits must see the real client
+address: set CLIENT_IP_HEADER (server.client_ip_header) when the platform
+writes it into a header of its own, as Fly.io does with Fly-Client-IP, or
+TRUSTED_PROXY_HOPS (server.trusted_proxy_hops) to the number of proxies that
+append it to X-Forwarded-For.
 """
 
 from __future__ import annotations
@@ -178,16 +180,30 @@ def trusted_proxy_hops() -> int:
     return int(os.environ.get("TRUSTED_PROXY_HOPS") or settings.server.get("trusted_proxy_hops", 0))
 
 
+def client_ip_header() -> str:
+    # An empty CLIENT_IP_HEADER still overrides the config: it turns the header off.
+    value = os.environ.get("CLIENT_IP_HEADER", settings.server.get("client_ip_header"))
+    return (value or "").strip().lower()
+
+
 def client_ip(request: Request) -> str:
     """The address to rate-limit by.
 
-    By default the TCP peer. Only when the app runs behind N trusted proxies
-    (trusted_proxy_hops) is X-Forwarded-For used: each proxy appends the
-    address it received the request from, so the Nth entry from the right
-    was written by the outermost trusted proxy. Entries further left come
-    from the client and can be forged.
+    By default the TCP peer. Behind a proxy, one of two settings applies:
+
+    - client_ip_header: a header the proxy always overwrites with the client
+      address (Fly-Client-IP on Fly.io). Used as is; the peer is the fallback.
+    - trusted_proxy_hops: N proxies that each append the address they
+      received the request from to X-Forwarded-For, so the Nth entry from the
+      right was written by the outermost one. Entries further left come from
+      the client and can be forged. Fly.io doesn't fit this rule: it appends
+      the app's own IP after the client's, which would put every visitor in
+      one rate-limit bucket.
     """
     peer = request.client.host if request.client else "unknown"
+    header = client_ip_header()
+    if header:
+        return request.headers.get(header, "").strip() or peer
     hops = trusted_proxy_hops()
     if hops <= 0:
         return peer
