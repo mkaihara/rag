@@ -29,11 +29,15 @@ CREATE TABLE IF NOT EXISTS index_meta (
 """
 
 COLUMNS = ["id", "doc_id", "source", "title", "authors", "section", "section_path", "part", "pages", "reference", "tokens", "text"]
-RESULT_COLUMNS = ", ".join(c for c in COLUMNS)
+RESULT_COLUMNS = ", ".join(COLUMNS)
 
 
 def vector_literal(v: Sequence[float]) -> str:
-    return "[" + ",".join(f"{x:.7g}" for x in v) + "]"
+    """The vector as pgvector text, e.g. "[0.1,-0.25,0.03]" (7 significant digits)."""
+    numbers = []
+    for x in v:
+        numbers.append(f"{x:.7g}")
+    return "[" + ",".join(numbers) + "]"
 
 
 def connect(dsn: str) -> psycopg.Connection:
@@ -46,11 +50,14 @@ def ensure_meta(conn: psycopg.Connection) -> None:
 
 
 def stored_fingerprint(conn: psycopg.Connection, profile: str, table: str) -> str | None:
-    exists = conn.execute("SELECT to_regclass(%s) AS t", (table,)).fetchone()["t"]
-    if not exists:
+    # to_regclass gives NULL when the table does not exist.
+    table_row = conn.execute("SELECT to_regclass(%s) AS t", (table,)).fetchone()
+    if not table_row["t"]:
         return None
     row = conn.execute("SELECT fingerprint FROM index_meta WHERE profile = %s", (profile,)).fetchone()
-    return row["fingerprint"] if row else None
+    if not row:
+        return None
+    return row["fingerprint"]
 
 
 def replace_index(
@@ -88,15 +95,27 @@ def replace_index(
                 )"""
             ).format(t=t, dims=sql.Literal(dims))
         )
+        # INSERT INTO t (id, doc_id, ..., embedding) VALUES (%s, %s, ..., %s::vector)
+        column_names = []
+        placeholders = []
+        for column in COLUMNS:
+            column_names.append(sql.Identifier(column))
+            placeholders.append(sql.Placeholder())
+        insert = sql.SQL("INSERT INTO {} ({}, embedding) VALUES ({}, %s::vector)").format(
+            t,
+            sql.SQL(", ").join(column_names),
+            sql.SQL(", ").join(placeholders),
+        )
+        # One row of values per chunk: its columns, then its vector.
+        values = []
+        for record, vector in zip(records, vectors, strict=True):
+            row = []
+            for column in COLUMNS:
+                row.append(record[column])
+            row.append(vector_literal(vector))
+            values.append(row)
         with conn.cursor() as cur:
-            cur.executemany(
-                sql.SQL("INSERT INTO {} ({}, embedding) VALUES ({}, %s::vector)").format(
-                    t,
-                    sql.SQL(", ").join(map(sql.Identifier, COLUMNS)),
-                    sql.SQL(", ").join(sql.Placeholder() * len(COLUMNS)),
-                ),
-                [[r[c] for c in COLUMNS] + [vector_literal(v)] for r, v in zip(records, vectors, strict=True)],
-            )
+            cur.executemany(insert, values)
         conn.execute(sql.SQL("CREATE INDEX ON {} USING hnsw (embedding vector_cosine_ops)").format(t))
         conn.execute(sql.SQL("CREATE INDEX ON {} USING gin (tsv)").format(t))
         conn.execute(
@@ -129,9 +148,22 @@ def keyword_search(conn: psycopg.Connection, table: str, question: str, limit: i
 
 def index_status(conn: psycopg.Connection, profile: str) -> dict | None:
     row = conn.execute("SELECT * FROM index_meta WHERE profile = %s", (profile,)).fetchone()
-    return json.loads(json.dumps(row, default=str)) if row else None
+    if not row:
+        return None
+    # Round-trip through JSON so values such as built_at (a datetime) become strings.
+    as_json = json.dumps(row, default=str)
+    return json.loads(as_json)
 
 
 def all_vectors(conn: psycopg.Connection, table: str) -> dict[str, list[float]]:
-    rows = conn.execute(sql.SQL("SELECT id, embedding::text AS v FROM {}").format(sql.Identifier(table))).fetchall()
-    return {r["id"]: [float(x) for x in r["v"].strip("[]").split(",")] for r in rows}
+    query = sql.SQL("SELECT id, embedding::text AS v FROM {}").format(sql.Identifier(table))
+    rows = conn.execute(query).fetchall()
+    vectors = {}
+    for row in rows:
+        # pgvector text looks like "[0.1,-0.25,0.03]".
+        numbers = row["v"].strip("[]").split(",")
+        vector = []
+        for number in numbers:
+            vector.append(float(number))
+        vectors[row["id"]] = vector
+    return vectors
