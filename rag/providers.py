@@ -34,7 +34,12 @@ class Truncated:
 
 
 def _retryable(status) -> bool:
-    return isinstance(status, int) and (status == 429 or status >= 500)
+    """Rate limits (429) and server errors (5xx) are worth another try."""
+    if not isinstance(status, int):
+        return False
+    if status == 429:
+        return True
+    return status >= 500
 
 
 def _headers(cfg: ModelConfig) -> dict[str, str]:
@@ -47,7 +52,8 @@ def _headers(cfg: ModelConfig) -> dict[str, str]:
 
 def _check(r: httpx.Response) -> None:
     if r.is_error:
-        raise ProviderError(f"{r.request.method} {r.request.url} -> {r.status_code}: {r.text[:500]}", _retryable(r.status_code))
+        message = f"{r.request.method} {r.request.url} -> {r.status_code}: {r.text[:500]}"
+        raise ProviderError(message, _retryable(r.status_code))
 
 
 def _normalize(v: Sequence[float], dims: int) -> list[float]:
@@ -55,13 +61,23 @@ def _normalize(v: Sequence[float], dims: int) -> list[float]:
     v = list(v[:dims])
     if len(v) != dims:
         raise ProviderError(f"embedding has {len(v)} dimensions, config expects {dims}")
-    norm = math.sqrt(sum(x * x for x in v)) or 1.0
-    return [x / norm for x in v]
+    sum_of_squares = 0.0
+    for x in v:
+        sum_of_squares += x * x
+    norm = math.sqrt(sum_of_squares)
+    if norm == 0:  # an all-zero vector stays as it is
+        norm = 1.0
+    normalized = []
+    for x in v:
+        normalized.append(x / norm)
+    return normalized
 
 
 class Embedder:
     def __init__(self, cfg: ModelConfig, dimensions: int, query_instruction: str = ""):
-        self.cfg, self.dims, self.instruction = cfg, dimensions, query_instruction
+        self.cfg = cfg
+        self.dims = dimensions
+        self.instruction = query_instruction
         self.client = httpx.Client(timeout=TIMEOUT)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -79,29 +95,46 @@ class Embedder:
                 json={"model": self.cfg.model, "input": texts, "dimensions": self.dims},
             )
             _check(r)
-            data = sorted(r.json()["data"], key=lambda d: d["index"])
-            vectors = [d["embedding"] for d in data]
+            # Each item says which input it belongs to; put them back in input order.
+            items = r.json()["data"]
+
+            def input_position(item):
+                return item["index"]
+
+            vectors = []
+            for item in sorted(items, key=input_position):
+                vectors.append(item["embedding"])
         if len(vectors) != len(texts):
             raise ProviderError(f"asked for {len(texts)} embeddings, got {len(vectors)}")
-        return [_normalize(v, self.dims) for v in vectors]
+        normalized = []
+        for vector in vectors:
+            normalized.append(_normalize(vector, self.dims))
+        return normalized
 
     def embed_query(self, question: str) -> list[float]:
-        text = f"Instruct: {self.instruction}\nQuery:{question}" if self.instruction else question
-        return self.embed([text])[0]
+        # Instruction-tuned embedders (Qwen3) expect this format for queries.
+        if self.instruction:
+            text = f"Instruct: {self.instruction}\nQuery:{question}"
+        else:
+            text = question
+        vectors = self.embed([text])
+        return vectors[0]
 
 
 def openrouter_body(cfg: ModelConfig, messages: list[dict[str, str]]) -> dict:
     """Chat request for OpenRouter. With `fallback_models`, OpenRouter tries
     them in order when the primary model errors (outage, overload, rate limit)."""
     body: dict = {"messages": messages, "stream": True}
-    if fallbacks := cfg.options.get("fallback_models"):
-        body["models"] = [cfg.model, *fallbacks]
+    fallbacks = cfg.options.get("fallback_models")
+    if fallbacks:
+        body["models"] = [cfg.model] + list(fallbacks)
     else:
         body["model"] = cfg.model
-    for k in ("temperature", "max_tokens"):
-        if k in cfg.options:
-            body[k] = cfg.options[k]
-    if effort := cfg.options.get("reasoning_effort"):
+    for option in ("temperature", "max_tokens"):
+        if option in cfg.options:
+            body[option] = cfg.options[option]
+    effort = cfg.options.get("reasoning_effort")
+    if effort:
         # Hidden reasoning counts against max_tokens; keep it small and out of the stream.
         body["reasoning"] = {"effort": effort, "exclude": True}
     return body
@@ -124,7 +157,8 @@ async def stream_chat(cfg: ModelConfig, messages: list[dict[str, str]]) -> Async
                 yield piece
             return
         except ProviderError as e:
-            if started or not e.retryable or attempt == retries:
+            last_attempt = attempt == retries
+            if started or not e.retryable or last_attempt:
                 raise
             log.warning("chat request failed before the first token, retrying: %s", e)
             await asyncio.sleep(RETRY_DELAY)
@@ -134,20 +168,22 @@ async def _stream_chat_once(cfg: ModelConfig, messages: list[dict[str, str]]) ->
     opts = cfg.options
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         if cfg.provider == "ollama":
+            # Ollama's own option names; options that are not set are left out.
+            wanted_options = {
+                "num_ctx": opts.get("num_ctx"),
+                "temperature": opts.get("temperature"),
+                "num_predict": opts.get("max_tokens"),
+            }
+            ollama_options = {}
+            for name, value in wanted_options.items():
+                if value is not None:
+                    ollama_options[name] = value
             body = {
                 "model": cfg.model,
                 "messages": messages,
                 "stream": True,
                 "think": opts.get("think", False),
-                "options": {
-                    k: v
-                    for k, v in {
-                        "num_ctx": opts.get("num_ctx"),
-                        "temperature": opts.get("temperature"),
-                        "num_predict": opts.get("max_tokens"),
-                    }.items()
-                    if v is not None
-                },
+                "options": ollama_options,
             }
             async with client.stream("POST", f"{cfg.base_url}/api/chat", json=body) as r:
                 if r.is_error:
@@ -159,7 +195,9 @@ async def _stream_chat_once(cfg: ModelConfig, messages: list[dict[str, str]]) ->
                     event = json.loads(line)
                     if "error" in event:
                         raise ProviderError(event["error"])
-                    if piece := event.get("message", {}).get("content"):
+                    message = event.get("message", {})
+                    piece = message.get("content")
+                    if piece:
                         yield piece
                     if event.get("done"):
                         if event.get("done_reason") == "length":
@@ -175,7 +213,7 @@ async def _stream_chat_once(cfg: ModelConfig, messages: list[dict[str, str]]) ->
                 async for line in r.aiter_lines():
                     if not line.startswith("data: "):
                         continue  # blank lines and ": OPENROUTER PROCESSING" keep-alives
-                    data = line[6:].strip()
+                    data = line[len("data: ") :].strip()
                     if data == "[DONE]":
                         if truncated:
                             yield Truncated()
@@ -183,10 +221,17 @@ async def _stream_chat_once(cfg: ModelConfig, messages: list[dict[str, str]]) ->
                     event = json.loads(data)
                     if "error" in event:  # sent inside a 200 stream, e.g. the provider is overloaded
                         err = event["error"]
-                        code = err.get("code") if isinstance(err, dict) else None
+                        code = None
+                        if isinstance(err, dict):
+                            code = err.get("code")
                         raise ProviderError(str(err), _retryable(code))
-                    choices = event.get("choices") or [{}]
-                    if piece := choices[0].get("delta", {}).get("content"):
+                    choices = event.get("choices")
+                    if not choices:
+                        choices = [{}]
+                    choice = choices[0]
+                    delta = choice.get("delta", {})
+                    piece = delta.get("content")
+                    if piece:
                         yield piece
-                    if choices[0].get("finish_reason") == "length":
+                    if choice.get("finish_reason") == "length":
                         truncated = True

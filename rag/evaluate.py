@@ -59,24 +59,48 @@ def normalize(text: str) -> str:
 
 
 def relevant(text: str, item: dict[str, Any]) -> bool:
+    """True when the text contains any of the evidence item's quotes."""
     body = normalize(text)
-    return any(normalize(q) in body for q in item["quotes"])
+    for quote in item["quotes"]:
+        if normalize(quote) in body:
+            return True
+    return False
 
 
 def evidence_ranks(sources: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> list[int | None]:
     """1-based rank of the first source matching each evidence item, or None."""
     ranks = []
     for item in evidence:
-        ranks.append(next((i for i, s in enumerate(sources, 1) if relevant(s["text"], item)), None))
+        first_rank = None
+        for rank, source in enumerate(sources, start=1):
+            if relevant(source["text"], item):
+                first_rank = rank
+                break
+        ranks.append(first_rank)
     return ranks
 
 
 def retrieval_metrics(sources: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> dict[str, float]:
     ranks = evidence_ranks(sources, evidence)
-    found = [r for r in ranks if r is not None]
-    metrics = {"rr": 1.0 / min(found) if found else 0.0}
+    found = []
+    for rank in ranks:
+        if rank is not None:
+            found.append(rank)
+
+    # Reciprocal rank of the best-placed evidence item (0 if none was found).
+    if found:
+        reciprocal_rank = 1.0 / min(found)
+    else:
+        reciprocal_rank = 0.0
+    metrics = {"rr": reciprocal_rank}
+
+    # Recall@k: the share of evidence items found within the top k sources.
     for k in KS:
-        metrics[f"recall@{k}"] = sum(1 for r in ranks if r is not None and r <= k) / len(ranks)
+        within_k = 0
+        for rank in ranks:
+            if rank is not None and rank <= k:
+                within_k += 1
+        metrics[f"recall@{k}"] = within_k / len(ranks)
     return metrics
 
 
@@ -94,16 +118,34 @@ def cited_sentences(answer: str) -> list[dict[str, Any]]:
     Math is blanked out first, so brackets and periods inside $...$ are
     neither citations nor sentence ends; the returned text is the original.
     """
-    masked = _MATH.sub(lambda m: " " * len(m.group()), answer)
-    out, start = [], 0
-    for m in [*_SENTENCE_END.finditer(masked), None]:
-        end = m.start() if m else len(masked)
+
+    def blank(match):
+        return " " * len(match.group())
+
+    # Same length as the answer, so positions in one are positions in the other.
+    masked = _MATH.sub(blank, answer)
+
+    # Every sentence end as (where the sentence stops, where the next starts);
+    # the end of the answer closes the last sentence.
+    boundaries = []
+    for match in _SENTENCE_END.finditer(masked):
+        boundaries.append((match.start(), match.end()))
+    boundaries.append((len(masked), len(masked)))
+
+    out = []
+    start = 0
+    for end, next_start in boundaries:
         part = masked[start:end]
         if part.strip():
-            numbers = [int(n) for c in _CITE.findall(part) for n in re.split(r"\s*[,;]\s*", c)]
-            out.append({"text": answer[start:end].strip(), "cites": list(dict.fromkeys(numbers))})
-        if m:
-            start = m.end()
+            # "[2]", "[1, 3]" or "[1; 3]": every number counts, each once, in order.
+            cites = []
+            for inside_brackets in _CITE.findall(part):
+                for number in re.split(r"\s*[,;]\s*", inside_brackets):
+                    n = int(number)
+                    if n not in cites:
+                        cites.append(n)
+            out.append({"text": answer[start:end].strip(), "cites": cites})
+        start = next_start
     return out
 
 
@@ -124,13 +166,18 @@ def ask_one(client: httpx.Client, url: str, question: str) -> dict[str, Any]:
             event = json.loads(line)
             kind = event.get("type")
             if kind == "sources":
-                record["sources"] = [
-                    {k: s.get(k) for k in ("n", "id", "title", "section", "similarity", "text")} for s in event["sources"]
-                ]
+                sources = []
+                for source in event["sources"]:
+                    kept = {}
+                    for field in ("n", "id", "title", "section", "similarity", "text"):
+                        kept[field] = source.get(field)
+                    sources.append(kept)
+                record["sources"] = sources
             elif kind == "token":
                 pieces.append(event["text"])
             elif kind == "done":
-                record["truncated"], record["timings"] = event.get("truncated"), event.get("timings")
+                record["truncated"] = event.get("truncated")
+                record["timings"] = event.get("timings")
             elif kind == "error":
                 record["error"] = event.get("message")
         record["answer"] = "".join(pieces)
@@ -142,7 +189,11 @@ class RateLimited(Exception):
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
 
 
 def append_jsonl(path: Path, obj: dict[str, Any]) -> None:
@@ -154,12 +205,19 @@ def cmd_ask(args: argparse.Namespace) -> None:
     url = args.url.rstrip("/")
     out = RESULTS / f"{args.name}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
-    done: set[str] = set()
+
+    done: set[str] = set()  # ids of questions already answered without error
     if args.resume and out.exists():
-        done = {r["id"] for r in read_jsonl(out) if r.get("type") == "answer" and not r.get("error")}
+        previous = read_jsonl(out)
+        for row in previous:
+            if row.get("type") == "answer" and not row.get("error"):
+                done.add(row["id"])
         # keep only good answers, so failed ones are asked again
-        kept = [r for r in read_jsonl(out) if r.get("type") != "answer" or r["id"] in done]
-        out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept), encoding="utf-8")
+        kept_lines = []
+        for row in previous:
+            if row.get("type") != "answer" or row["id"] in done:
+                kept_lines.append(json.dumps(row, ensure_ascii=False) + "\n")
+        out.write_text("".join(kept_lines), encoding="utf-8")
     elif out.exists():
         sys.exit(f"{out} exists; pass --resume to continue it, or delete it")
 
@@ -167,11 +225,23 @@ def cmd_ask(args: argparse.Namespace) -> None:
     with httpx.Client(timeout=timeout) as client:
         if not out.exists():
             info = client.get(f"{url}/api/info").raise_for_status().json()
-            append_jsonl(out, {"type": "info", "name": args.name, "url": url, "date": time.strftime("%Y-%m-%d"), "info": info})
-        questions = [q for q in load_questions()[: args.limit or None] if q["id"] not in done]
+            header = {"type": "info", "name": args.name, "url": url, "date": time.strftime("%Y-%m-%d"), "info": info}
+            append_jsonl(out, header)
+
+        all_questions = load_questions()
+        if args.limit:
+            all_questions = all_questions[: args.limit]
+        questions = []
+        for q in all_questions:
+            if q["id"] not in done:
+                questions.append(q)
+
         for i, q in enumerate(questions):
-            if i:
+            if i > 0:
                 time.sleep(args.delay)
+
+            # Up to 6 tries; after a 429, wait a minute for the limit to reset.
+            record = None
             for _attempt in range(6):
                 try:
                     t0 = time.monotonic()
@@ -180,10 +250,16 @@ def cmd_ask(args: argparse.Namespace) -> None:
                 except RateLimited:
                     print(f"{q['id']}: rate limited, waiting 60 s", flush=True)
                     time.sleep(60)
-            else:
+            if record is None:
                 sys.exit("still rate limited after 6 tries")
-            append_jsonl(out, {"type": "answer", "id": q["id"], "question": q["question"], **record})
-            status = record["error"] or f"{len(record['answer'])} chars, {len(record['sources'])} sources"
+
+            row = {"type": "answer", "id": q["id"], "question": q["question"]}
+            row.update(record)
+            append_jsonl(out, row)
+            if record["error"]:
+                status = record["error"]
+            else:
+                status = f"{len(record['answer'])} chars, {len(record['sources'])} sources"
             print(f"{q['id']}: {time.monotonic() - t0:5.0f} s  {status}", flush=True)
     print(f"wrote {out}")
 
@@ -207,43 +283,80 @@ Reply with JSON only, no prose and no code fence:
 
 
 def judge_messages(question: str, sentences: list[dict[str, Any]], sources: dict[int, dict[str, Any]]) -> list[dict[str, str]]:
-    src = "\n\n".join(f"[{n}] {s['title']}, {s['section']}\n{s['text']}" for n, s in sorted(sources.items()))
-    lines = "\n".join(f"{i}. {s['text']}  (cites {', '.join(map(str, s['cites']))})" for i, s in enumerate(sentences, 1))
+    source_blocks = []
+    for n in sorted(sources):
+        s = sources[n]
+        source_blocks.append(f"[{n}] {s['title']}, {s['section']}\n{s['text']}")
+    src = "\n\n".join(source_blocks)
+
+    sentence_lines = []
+    for i, s in enumerate(sentences, start=1):
+        cited_numbers = []
+        for n in s["cites"]:
+            cited_numbers.append(str(n))
+        sentence_lines.append(f"{i}. {s['text']}  (cites {', '.join(cited_numbers)})")
+    lines = "\n".join(sentence_lines)
+
     user = f"Question: {question}\n\nCited sources:\n\n{src}\n\nSentences to check:\n{lines}"
     return [{"role": "system", "content": JUDGE_PROMPT}, {"role": "user", "content": user}]
 
 
 def parse_json(text: str) -> dict[str, Any]:
+    # Remove a ```json ... ``` fence if the model added one anyway.
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
     return json.loads(text)
 
 
 def call_judge(client: httpx.Client, cfg: ModelConfig, messages: list[dict[str, str]]) -> dict[str, Any]:
-    body = {**openrouter_body(cfg, messages), "stream": False}
+    body = openrouter_body(cfg, messages)
+    body["stream"] = False  # one JSON reply, not a stream
     r = client.post(f"{cfg.base_url}/chat/completions", headers=_headers(cfg), json=body)
     _check(r)
-    return parse_json(r.json()["choices"][0]["message"]["content"])
+    reply = r.json()["choices"][0]["message"]["content"]
+    return parse_json(reply)
 
 
 def judge_record(client: httpx.Client, cfg: ModelConfig, record: dict[str, Any]) -> list[dict[str, Any]]:
     """One entry per (sentence, cited source): valid, and the judge's verdict."""
-    numbered = {s["n"]: s for s in record["sources"]}
-    sentences = [s for s in cited_sentences(record["answer"]) if s["cites"]]
-    pairs = [
-        {"sentence": i, "text": s["text"], "source": n, "valid": n in numbered}
-        for i, s in enumerate(sentences, 1)
-        for n in s["cites"]
-    ]
-    cited = {p["source"]: numbered[p["source"]] for p in pairs if p["valid"]}
+    numbered = {}
+    for source in record["sources"]:
+        numbered[source["n"]] = source
+
+    sentences = []
+    for sentence in cited_sentences(record["answer"]):
+        if sentence["cites"]:
+            sentences.append(sentence)
+
+    # A citation is valid when its number is one of the returned sources.
+    pairs = []
+    for i, sentence in enumerate(sentences, start=1):
+        for n in sentence["cites"]:
+            pairs.append({"sentence": i, "text": sentence["text"], "source": n, "valid": n in numbered})
+
+    cited = {}
+    for pair in pairs:
+        if pair["valid"]:
+            cited[pair["source"]] = numbered[pair["source"]]
+
     if cited:
-        verdicts = call_judge(client, cfg, judge_messages(record["question"], sentences, cited))["verdicts"]
-        by_pair = {(v["sentence"], v["source"]): v for v in verdicts}
-        for p in pairs:
-            v = by_pair.get((p["sentence"], p["source"]))
-            if p["valid"] and v:
-                p["verdict"], p["reason"] = v["verdict"], v.get("reason", "")
-    for p in pairs:
-        p.setdefault("verdict", None if p["valid"] else "invalid")
+        reply = call_judge(client, cfg, judge_messages(record["question"], sentences, cited))
+        by_pair = {}
+        for verdict in reply["verdicts"]:
+            by_pair[(verdict["sentence"], verdict["source"])] = verdict
+        for pair in pairs:
+            verdict = by_pair.get((pair["sentence"], pair["source"]))
+            if pair["valid"] and verdict:
+                pair["verdict"] = verdict["verdict"]
+                pair["reason"] = verdict.get("reason", "")
+
+    # Pairs without a verdict: None if the judge skipped them, "invalid" if
+    # the cited number was not a returned source.
+    for pair in pairs:
+        if "verdict" not in pair:
+            if pair["valid"]:
+                pair["verdict"] = None
+            else:
+                pair["verdict"] = "invalid"
     return pairs
 
 
@@ -255,12 +368,17 @@ def review_markdown(name: str, records: list[dict[str, Any]], questions: dict[st
     ]
     for r in records:
         q = questions[r["id"]]
-        out += [f"## {r['id']}: {r['question']}\n", f"**Expected:** {q['answer'].strip()}\n"]
-        out += [f"**Answer:**\n\n{r['answer'].strip() or '(no answer: ' + str(r.get('error')) + ')'}\n"]
+        out.append(f"## {r['id']}: {r['question']}\n")
+        out.append(f"**Expected:** {q['answer'].strip()}\n")
+        answer = r["answer"].strip()
+        if not answer:
+            answer = "(no answer: " + str(r.get("error")) + ")"
+        out.append(f"**Answer:**\n\n{answer}\n")
         if r.get("truncated"):
             out.append("*(stopped at the length limit)*\n")
         out.append("**Sources:**\n")
-        out += [f"- [{s['n']}] {s['title']}, {s['section']}" for s in r["sources"]]
+        for s in r["sources"]:
+            out.append(f"- [{s['n']}] {s['title']}, {s['section']}")
         out.append("\n**Grade:** ?\n")
     return "\n".join(out)
 
@@ -279,18 +397,25 @@ def cmd_judge(args: argparse.Namespace) -> None:
             if row.get("type") == "answer" and not row.get("error"):
                 row["citations"] = judge_record(client, cfg, row)
                 row["judge"] = args.model
-                counts = {
-                    v: sum(1 for p in row["citations"] if p["verdict"] == v)
-                    for v in ("supported", "partial", "unsupported", "invalid")
-                }
+                counts = {"supported": 0, "partial": 0, "unsupported": 0, "invalid": 0}
+                for pair in row["citations"]:
+                    if pair["verdict"] in counts:
+                        counts[pair["verdict"]] += 1
                 print(f"{row['id']}: {counts}", flush=True)
             append_jsonl(out, row)
-    answers = [r for r in rows if r.get("type") == "answer"]
+
+    answers = []
+    for row in rows:
+        if row.get("type") == "answer":
+            answers.append(row)
     review = path.with_name(path.stem + ".review.md")
     if review.exists():
         print(f"kept your existing {review}")
     else:
-        review.write_text(review_markdown(path.stem, answers, {q["id"]: q for q in load_questions()}), encoding="utf-8")
+        questions = {}
+        for q in load_questions():
+            questions[q["id"]] = q
+        review.write_text(review_markdown(path.stem, answers, questions), encoding="utf-8")
         print(f"wrote {review}: fill in the grades")
     print(f"wrote {out}")
 
@@ -300,87 +425,208 @@ def cmd_judge(args: argparse.Namespace) -> None:
 
 
 def read_grades(path: Path) -> dict[str, str]:
-    grades, current = {}, None
+    """The hand grades in a review file, by question id."""
+    grades = {}
+    current = None  # the question whose section we are in
     if not path.exists():
         return grades
     for line in path.read_text(encoding="utf-8").splitlines():
-        if m := re.match(r"## (q\d+):", line):
-            current = m.group(1)
-        elif (m := re.match(r"\*\*Grade:\*\*\s*(\w+)", line)) and current and m.group(1).lower() in GRADES:
-            grades[current] = m.group(1).lower()
+        heading = re.match(r"## (q\d+):", line)
+        if heading:
+            current = heading.group(1)
+            continue
+        grade_line = re.match(r"\*\*Grade:\*\*\s*(\w+)", line)
+        if grade_line and current:
+            grade = grade_line.group(1).lower()
+            if grade in GRADES:
+                grades[current] = grade
     return grades
 
 
 def summarize(rows: list[dict[str, Any]], questions: dict[str, dict[str, Any]], grades: dict[str, str]) -> dict[str, Any]:
-    answers = [r for r in rows if r.get("type") == "answer"]
-    answerable = [r for r in answers if questions[r["id"]]["evidence"]]
-    unanswerable = [r for r in answers if not questions[r["id"]]["evidence"]]
-    per_q = {r["id"]: retrieval_metrics(r["sources"], questions[r["id"]]["evidence"]) for r in answerable}
-    pairs = [p for r in answers for p in r.get("citations", [])]
-    mean = lambda xs: sum(xs) / len(xs) if xs else float("nan")  # noqa: E731
-    timing = lambda k: statistics.median([r["timings"][k] for r in answers if r.get("timings") and r["timings"].get(k)] or [0])  # noqa: E731
-    info = next((r for r in rows if r.get("type") == "info"), {})
+    info = {}
+    for row in rows:
+        if row.get("type") == "info":
+            info = row
+            break
+
+    # Questions with evidence are answerable; the others test refusals.
+    answers = []
+    answerable = []
+    unanswerable = []
+    for row in rows:
+        if row.get("type") != "answer":
+            continue
+        answers.append(row)
+        if questions[row["id"]]["evidence"]:
+            answerable.append(row)
+        else:
+            unanswerable.append(row)
+
+    per_q = {}
+    for r in answerable:
+        per_q[r["id"]] = retrieval_metrics(r["sources"], questions[r["id"]]["evidence"])
+
+    def mean(values):
+        if not values:
+            return float("nan")
+        return sum(values) / len(values)
+
+    reciprocal_ranks = []
+    for metrics in per_q.values():
+        reciprocal_ranks.append(metrics["rr"])
+    recall = {}
+    for k in KS:
+        values = []
+        for metrics in per_q.values():
+            values.append(metrics[f"recall@{k}"])
+        recall[k] = mean(values)
+
+    def timing(key):
+        """Median of one timing over the answers that have it (0 if none)."""
+        values = []
+        for r in answers:
+            timings = r.get("timings")
+            if timings and timings.get(key):
+                values.append(timings[key])
+        if not values:
+            values = [0]
+        return statistics.median(values)
+
+    # Citation pairs from the judge, and what it said about them.
+    pairs = []
+    for r in answers:
+        pairs.extend(r.get("citations", []))
+    valid = 0
+    verdicts = {"supported": 0, "partial": 0, "unsupported": 0}
+    for pair in pairs:
+        if pair["verdict"] != "invalid":
+            valid += 1
+        if pair["verdict"] in verdicts:
+            verdicts[pair["verdict"]] += 1
+
+    judged = False
+    judge = None
+    for r in answers:
+        if "citations" in r:
+            judged = True
+    for r in answers:
+        if r.get("judge"):
+            judge = r["judge"]
+            break
+
+    # Hand grades.
+    grade_counts = {}
+    for g in GRADES:
+        grade_counts[g] = 0
+    graded = 0
+    for r in answerable:
+        grade = grades.get(r["id"])
+        if grade in grade_counts:
+            grade_counts[grade] += 1
+        if r["id"] in grades:
+            graded += 1
+    refused = 0
+    refusal_graded = 0
+    for r in unanswerable:
+        if grades.get(r["id"]) == "correct":
+            refused += 1
+        if r["id"] in grades:
+            refusal_graded += 1
+
+    truncated = 0
+    errors = 0
+    for r in answers:
+        if r.get("truncated"):
+            truncated += 1
+        if r.get("error"):
+            errors += 1
+
     return {
         "info": info,
         "n": len(answerable),
-        "mrr": mean([m["rr"] for m in per_q.values()]),
-        "recall": {k: mean([m[f"recall@{k}"] for m in per_q.values()]) for k in KS},
+        "mrr": mean(reciprocal_ranks),
+        "recall": recall,
         "per_question": per_q,
         "pairs": len(pairs),
-        "valid": sum(p["verdict"] != "invalid" for p in pairs),
-        "verdicts": {v: sum(p["verdict"] == v for p in pairs) for v in ("supported", "partial", "unsupported")},
-        "judged": any("citations" in r for r in answers),
-        "judge": next((r["judge"] for r in answers if r.get("judge")), None),
-        "grades": {g: sum(grades.get(r["id"]) == g for r in answerable) for g in GRADES},
-        "graded": sum(r["id"] in grades for r in answerable),
-        "refused": sum(grades.get(r["id"]) == "correct" for r in unanswerable),
-        "refusal_graded": sum(r["id"] in grades for r in unanswerable),
+        "valid": valid,
+        "verdicts": verdicts,
+        "judged": judged,
+        "judge": judge,
+        "grades": grade_counts,
+        "graded": graded,
+        "refused": refused,
+        "refusal_graded": refusal_graded,
         "unanswerable": len(unanswerable),
         "first_token_s": timing("first_token_ms") / 1000,
         "total_s": timing("total_ms") / 1000,
-        "truncated": sum(bool(r.get("truncated")) for r in answers),
-        "errors": sum(bool(r.get("error")) for r in answers),
+        "truncated": truncated,
+        "errors": errors,
     }
 
 
 def frac(a: int, b: int) -> str:
-    return f"{a}/{b} ({a / b:.0%})" if b else "–"
+    """ "3/4 (75%)", or "–" when there is nothing to count."""
+    if not b:
+        return "–"
+    return f"{a}/{b} ({a / b:.0%})"
 
 
 def report_markdown(names: list[str], stats: list[dict[str, Any]]) -> str:
-    rows = [
-        ("Questions with evidence", [str(s["n"]) for s in stats]),
-        ("MRR@6", [f"{s['mrr']:.2f}" for s in stats]),
-        *[(f"Recall@{k}", [f"{s['recall'][k]:.2f}" for s in stats]) for k in KS],
-        ("Citations pointing to a returned source", [frac(s["valid"], s["pairs"]) for s in stats]),
-        ("Citations supported (judge)", [frac(s["verdicts"]["supported"], s["valid"]) if s["judged"] else "–" for s in stats]),
-        ("Citations partly supported", [frac(s["verdicts"]["partial"], s["valid"]) if s["judged"] else "–" for s in stats]),
-        ("Citations unsupported", [frac(s["verdicts"]["unsupported"], s["valid"]) if s["judged"] else "–" for s in stats]),
-        ("Answers correct (graded by hand)", [frac(s["grades"]["correct"], s["graded"]) for s in stats]),
-        ("Answers partly correct", [frac(s["grades"]["partial"], s["graded"]) for s in stats]),
-        ("Says when the papers don't answer", [frac(s["refused"], s["refusal_graded"]) for s in stats]),
-        ("Median time to first word", [f"{s['first_token_s']:.1f} s" for s in stats]),
-        ("Median time per answer", [f"{s['total_s']:.1f} s" for s in stats]),
-        ("Answers cut at the length limit", [str(s["truncated"]) for s in stats]),
-    ]
+    def judged_share(s, verdict):
+        if not s["judged"]:
+            return "–"
+        return frac(s["verdicts"][verdict], s["valid"])
+
+    # One table row per metric: (label, one value per results file).
+    rows = []
+    rows.append(("Questions with evidence", [str(s["n"]) for s in stats]))
+    rows.append(("MRR@6", [f"{s['mrr']:.2f}" for s in stats]))
+    for k in KS:
+        rows.append((f"Recall@{k}", [f"{s['recall'][k]:.2f}" for s in stats]))
+    rows.append(("Citations pointing to a returned source", [frac(s["valid"], s["pairs"]) for s in stats]))
+    rows.append(("Citations supported (judge)", [judged_share(s, "supported") for s in stats]))
+    rows.append(("Citations partly supported", [judged_share(s, "partial") for s in stats]))
+    rows.append(("Citations unsupported", [judged_share(s, "unsupported") for s in stats]))
+    rows.append(("Answers correct (graded by hand)", [frac(s["grades"]["correct"], s["graded"]) for s in stats]))
+    rows.append(("Answers partly correct", [frac(s["grades"]["partial"], s["graded"]) for s in stats]))
+    rows.append(("Says when the papers don't answer", [frac(s["refused"], s["refusal_graded"]) for s in stats]))
+    rows.append(("Median time to first word", [f"{s['first_token_s']:.1f} s" for s in stats]))
+    rows.append(("Median time per answer", [f"{s['total_s']:.1f} s" for s in stats]))
+    rows.append(("Answers cut at the length limit", [str(s["truncated"]) for s in stats]))
+
     head = "| | " + " | ".join(names) + " |\n|---|" + "---|" * len(names)
-    lines = ["## Results\n", head, *[f"| {label} | " + " | ".join(vals) + " |" for label, vals in rows]]
-    lines += ["\n## Setup\n"]
+    lines = ["## Results\n", head]
+    for label, values in rows:
+        lines.append(f"| {label} | " + " | ".join(values) + " |")
+
+    lines.append("\n## Setup\n")
     for name, s in zip(names, stats, strict=True):
         i = s["info"].get("info", {})
         judge = s["judge"]
-        lines.append(
+        line = (
             f"- **{name}** ({s['info'].get('date', '?')}): LLM `{i.get('llm')}`, embeddings `{i.get('embedding')}`, "
             f"top {i.get('top_k')} sources, {i.get('index', {}).get('chunks', '?')} chunks"
-            + (f"; citations judged by `{judge}`" if judge else "")
         )
+        if judge:
+            line += f"; citations judged by `{judge}`"
+        lines.append(line)
+
     ids = sorted(stats[0]["per_question"])
-    lines += ["\n## Rank of the first relevant source\n", "| Question | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+    lines.append("\n## Rank of the first relevant source\n")
+    lines.append("| Question | " + " | ".join(names) + " |")
+    lines.append("|---|" + "---|" * len(names))
     for qid in ids:
         cells = []
         for s in stats:
             m = s["per_question"].get(qid)
-            cells.append("–" if m is None else (f"{round(1 / m['rr'])}" if m["rr"] else "not in top 6"))
+            if m is None:
+                cells.append("–")
+            elif m["rr"]:
+                rank = round(1 / m["rr"])
+                cells.append(f"{rank}")
+            else:
+                cells.append("not in top 6")
         lines.append(f"| {qid} | " + " | ".join(cells) + " |")
     lines.append(
         f"\nWith {stats[0]['n']} questions, a difference of one or two questions is within noise. Retrieval metrics compare "
@@ -390,11 +636,14 @@ def report_markdown(names: list[str], stats: list[dict[str, Any]]) -> str:
 
 
 def cmd_report(args: argparse.Namespace) -> None:
-    questions = {q["id"]: q for q in load_questions()}
-    names, stats = [], []
+    questions = {}
+    for q in load_questions():
+        questions[q["id"]] = q
+    names = []
+    stats = []
     for f in args.files:
         path = Path(f)
-        name = path.name.split(".")[0]
+        name = path.name.split(".")[0]  # "cloud.judged.jsonl" -> "cloud"
         grades = read_grades(path.with_name(name + ".review.md"))
         names.append(name)
         stats.append(summarize(read_jsonl(path), questions, grades))
@@ -419,7 +668,12 @@ def main() -> None:
     r = sub.add_parser("report", help="compare judged results files")
     r.add_argument("files", nargs="+")
     args = p.parse_args()
-    {"ask": cmd_ask, "judge": cmd_judge, "report": cmd_report}[args.command](args)
+    if args.command == "ask":
+        cmd_ask(args)
+    elif args.command == "judge":
+        cmd_judge(args)
+    elif args.command == "report":
+        cmd_report(args)
 
 
 if __name__ == "__main__":

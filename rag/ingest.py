@@ -42,8 +42,11 @@ def log(msg: str) -> None:
 
 
 def fingerprint(records: list[dict], settings: Settings) -> str:
+    """A short hash of the embedding model and every chunk's id and text.
+    The index is rebuilt only when it changes."""
     h = hashlib.sha256()
-    h.update(json.dumps([settings.embedding.provider, settings.embedding.model, settings.dimensions]).encode())
+    model = [settings.embedding.provider, settings.embedding.model, settings.dimensions]
+    h.update(json.dumps(model).encode())
     for r in records:
         h.update(r["id"].encode())
         h.update(r["embed_text"].encode())
@@ -57,19 +60,35 @@ def fingerprint(records: list[dict], settings: Settings) -> str:
 
 
 def cache_key(settings: Settings, embed_text: str) -> str:
-    h = hashlib.sha256(f"{settings.embedding.model}\x00{settings.dimensions}\x00{embed_text}".encode())
+    # NUL separators: no model name or text can blur the boundary between fields.
+    key_text = f"{settings.embedding.model}\x00{settings.dimensions}\x00{embed_text}"
+    h = hashlib.sha256(key_text.encode())
     return h.hexdigest()[:24]
 
 
 def pack(v: list[float]) -> str:
-    return base64.b64encode(struct.pack(f"<{len(v)}e", *v)).decode()
+    """The vector as little-endian float16 values ("<e"), base64-encoded."""
+    layout = f"<{len(v)}e"
+    raw = struct.pack(layout, *v)
+    return base64.b64encode(raw).decode()
 
 
 def unpack(s: str) -> list[float]:
+    """Decode a packed vector and L2-normalize it again (float16 rounding
+    leaves it slightly off unit length)."""
     raw = base64.b64decode(s)
-    v = list(struct.unpack(f"<{len(raw) // 2}e", raw))
-    norm = math.sqrt(sum(x * x for x in v)) or 1.0
-    return [x / norm for x in v]
+    count = len(raw) // 2  # a float16 takes 2 bytes
+    v = list(struct.unpack(f"<{count}e", raw))
+    sum_of_squares = 0.0
+    for x in v:
+        sum_of_squares += x * x
+    norm = math.sqrt(sum_of_squares)
+    if norm == 0:
+        norm = 1.0
+    normalized = []
+    for x in v:
+        normalized.append(x / norm)
+    return normalized
 
 
 def cache_path(settings: Settings) -> Path:
@@ -80,9 +99,12 @@ def load_cache(settings: Settings) -> dict[str, list[float]]:
     path = cache_path(settings)
     if not path.exists():
         return {}
+    cache = {}
     with gzip.open(path, "rt", encoding="utf-8") as f:
-        entries = [json.loads(line) for line in f]
-    return {e["key"]: unpack(e["v"]) for e in entries}
+        for line in f:
+            entry = json.loads(line)
+            cache[entry["key"]] = unpack(entry["v"])
+    return cache
 
 
 def write_cache(settings: Settings, records: list[dict], vectors: list[list[float]]) -> Path:
@@ -91,7 +113,9 @@ def write_cache(settings: Settings, records: list[dict], vectors: list[list[floa
     # mtime=0 keeps the file byte-identical when the vectors are unchanged
     with open(path, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as gz:
         for r, v in zip(records, vectors, strict=True):
-            gz.write((json.dumps({"key": cache_key(settings, r["embed_text"]), "v": pack(v)}) + "\n").encode())
+            entry = {"key": cache_key(settings, r["embed_text"]), "v": pack(v)}
+            line = json.dumps(entry) + "\n"
+            gz.write(line.encode())
     return path
 
 
@@ -101,20 +125,26 @@ def write_cache(settings: Settings, records: list[dict], vectors: list[list[floa
 def embed_all(embedder: Embedder, records: list[dict], batch: int) -> list[list[float]]:
     vectors: list[list[float]] = []
     start = time.monotonic()
-    for i in range(0, len(records), batch):
-        texts = [r["embed_text"] for r in records[i : i + batch]]
+    for batch_start in range(0, len(records), batch):
+        texts = []
+        for r in records[batch_start : batch_start + batch]:
+            texts.append(r["embed_text"])
+
+        # Up to 3 attempts, waiting 2 s and then 4 s between them.
         for attempt in range(3):
             try:
-                vectors += embedder.embed(texts)
+                vectors.extend(embedder.embed(texts))
                 break
             except ProviderError as e:
                 if attempt == 2:
                     raise
                 log(f"  retrying after error: {e}")
                 time.sleep(2 * (attempt + 1))
+
         done = len(vectors)
         elapsed = time.monotonic() - start
-        eta = elapsed / done * (len(records) - done)
+        seconds_per_chunk = elapsed / done
+        eta = seconds_per_chunk * (len(records) - done)
         log(f"  embedded {done:4}/{len(records)}  ({elapsed:5.0f}s elapsed, ~{eta:4.0f}s left)")
     return vectors
 
@@ -125,8 +155,11 @@ def export_cache(settings: Settings, records: list[dict], fp: str) -> None:
         if store.stored_fingerprint(conn, settings.profile, settings.table) != fp:
             sys.exit(f"{settings.table} was not built from the current chunks; run rag.ingest first")
         stored = store.all_vectors(conn, settings.table)
-    vectors = [stored[r["id"]] for r in records]
-    log(f"wrote {len(vectors)} vectors to {write_cache(settings, records, vectors)}")
+    vectors = []
+    for r in records:
+        vectors.append(stored[r["id"]])
+    path = write_cache(settings, records, vectors)
+    log(f"wrote {len(vectors)} vectors to {path}")
 
 
 def main() -> None:
@@ -143,9 +176,14 @@ def main() -> None:
         sys.exit("DATABASE_URL is not set")
     log(f"profile {settings.profile}: embedding with {settings.embedding.model} ({settings.dimensions} dims)")
 
-    records = chunk_corpus(Path(args.data).resolve(), settings.chunking, log=lambda m: None)
-    docs = len({r["doc_id"] for r in records})
-    log(f"chunked {docs} documents into {len(records)} chunks")
+    def quiet(message):  # the chunker's per-document lines are not needed here
+        pass
+
+    records = chunk_corpus(Path(args.data).resolve(), settings.chunking, log=quiet)
+    doc_ids = set()
+    for r in records:
+        doc_ids.add(r["doc_id"])
+    log(f"chunked {len(doc_ids)} documents into {len(records)} chunks")
     fp = fingerprint(records, settings)
     if args.export_cache:
         export_cache(settings, records, fp)
@@ -153,19 +191,35 @@ def main() -> None:
 
     with store.connect(settings.database_url) as conn:
         store.ensure_meta(conn)
-        if not args.force and store.stored_fingerprint(conn, settings.profile, settings.table) == fp:
-            log(f"index {settings.table} is up to date ({fp}); nothing to do")
-            return
+        if not args.force:
+            stored = store.stored_fingerprint(conn, settings.profile, settings.table)
+            if stored == fp:
+                log(f"index {settings.table} is up to date ({fp}); nothing to do")
+                return
 
-        cache = {} if args.no_cache else load_cache(settings)
-        keys = [cache_key(settings, r["embed_text"]) for r in records]
-        missing = [r for r, k in zip(records, keys, strict=True) if k not in cache]
+        # Take vectors from the cache; embed only the chunks it lacks.
+        if args.no_cache:
+            cache = {}
+        else:
+            cache = load_cache(settings)
+        keys = []
+        missing = []
+        for r in records:
+            key = cache_key(settings, r["embed_text"])
+            keys.append(key)
+            if key not in cache:
+                missing.append(r)
         log(f"embedding cache: {len(records) - len(missing)} of {len(records)} chunks cached")
         if missing:
             embedder = Embedder(settings.embedding, settings.dimensions)
-            fresh = embed_all(embedder, missing, BATCH.get(settings.embedding.provider, 16))
-            cache.update({cache_key(settings, r["embed_text"]): v for r, v in zip(missing, fresh, strict=True)})
-        vectors = [cache[k] for k in keys]
+            batch = BATCH.get(settings.embedding.provider, 16)
+            fresh = embed_all(embedder, missing, batch)
+            for r, vector in zip(missing, fresh, strict=True):
+                cache[cache_key(settings, r["embed_text"])] = vector
+
+        vectors = []
+        for key in keys:
+            vectors.append(cache[key])
         store.replace_index(
             conn, settings.table, settings.profile, settings.dimensions, records, vectors, fp, settings.embedding.model
         )

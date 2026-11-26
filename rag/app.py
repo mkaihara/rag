@@ -61,9 +61,15 @@ async def lifespan(_: FastAPI):
     pool.open(wait=True, timeout=30)
     state["pool"] = pool
     state["embedder"] = Embedder(settings.embedding, settings.dimensions, settings.query_instruction)
-    warmup = asyncio.create_task(warm_up_models()) if settings.llm.provider == "ollama" else None
-    yield
-    if warmup:
+
+    # Only the local models (Ollama) need warming up.
+    warmup = None
+    if settings.llm.provider == "ollama":
+        warmup = asyncio.create_task(warm_up_models())
+
+    yield  # the app serves requests here
+
+    if warmup is not None:
         warmup.cancel()
     pool.close()
 
@@ -75,12 +81,18 @@ async def warm_up_models() -> None:
     weights in from disk while generating; in Docker on a Mac that made the
     first answer several times slower than the following ones.
     """
-    t0 = time.monotonic()
+    started = time.monotonic()
     try:
-        await run_in_threadpool(state["embedder"].embed_query, "warm-up")
-        async for _ in stream_chat(settings.llm, [{"role": "user", "content": "Reply with OK."}]):
+        embedder = state["embedder"]
+        await run_in_threadpool(embedder.embed_query, "warm-up")
+
+        # Generating the first piece of an answer loads the chat model.
+        messages = [{"role": "user", "content": "Reply with OK."}]
+        async for _first_piece in stream_chat(settings.llm, messages):
             break
-        log.warning("models warmed up in %.0fs", time.monotonic() - t0)
+
+        seconds = time.monotonic() - started
+        log.warning("models warmed up in %.0fs", seconds)
     except Exception as e:  # the app still works, the first question is just slower
         log.warning("model warm-up failed: %s", e)
 
@@ -129,27 +141,37 @@ class Hardening:
 
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
-                message = {**message, "headers": [*message.get("headers", []), *SECURITY_HEADERS]}
+                # Copy the message instead of changing the one we were given.
+                headers = list(message.get("headers", []))
+                headers.extend(SECURITY_HEADERS)
+                message = dict(message)
+                message["headers"] = headers
             await send(message)
 
         async def reject():
             body = b'{"detail":"Request too large"}'
-            await send_with_headers(
-                {
-                    "type": "http.response.start",
-                    "status": 413,
-                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
-                }
-            )
+            body_length = str(len(body)).encode()
+            response_start = {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [(b"content-type", b"application/json"), (b"content-length", body_length)],
+            }
+            await send_with_headers(response_start)
             await send({"type": "http.response.body", "body": body})
 
-        length = dict(scope["headers"]).get(b"content-length")
-        if length is not None and (not length.isdigit() or int(length) > MAX_BODY_BYTES):
-            return await reject()
+        # A declared Content-Length is checked before reading anything.
+        request_headers = dict(scope["headers"])
+        declared_length = request_headers.get(b"content-length")
+        if declared_length is not None:
+            if not declared_length.isdigit():
+                return await reject()
+            if int(declared_length) > MAX_BODY_BYTES:
+                return await reject()
 
+        # Chunked uploads have no Content-Length: count the bytes as they arrive.
         received = 0
 
-        async def limited_receive():  # chunked uploads have no Content-Length
+        async def limited_receive():
             nonlocal received
             message = await receive()
             if message["type"] == "http.request":
@@ -177,13 +199,22 @@ _hits: dict[str, deque[float]] = {}
 
 
 def trusted_proxy_hops() -> int:
-    return int(os.environ.get("TRUSTED_PROXY_HOPS") or settings.server.get("trusted_proxy_hops", 0))
+    # An empty TRUSTED_PROXY_HOPS counts as unset: the config value applies.
+    from_env = os.environ.get("TRUSTED_PROXY_HOPS")
+    if from_env:
+        return int(from_env)
+    return int(settings.server.get("trusted_proxy_hops", 0))
 
 
 def client_ip_header() -> str:
     # An empty CLIENT_IP_HEADER still overrides the config: it turns the header off.
-    value = os.environ.get("CLIENT_IP_HEADER", settings.server.get("client_ip_header"))
-    return (value or "").strip().lower()
+    if "CLIENT_IP_HEADER" in os.environ:
+        value = os.environ["CLIENT_IP_HEADER"]
+    else:
+        value = settings.server.get("client_ip_header")
+    if not value:
+        return ""
+    return value.strip().lower()
 
 
 def client_ip(request: Request) -> str:
@@ -200,39 +231,74 @@ def client_ip(request: Request) -> str:
       the app's own IP after the client's, which would put every visitor in
       one rate-limit bucket.
     """
-    peer = request.client.host if request.client else "unknown"
+    if request.client:
+        peer = request.client.host
+    else:
+        peer = "unknown"
+
     header = client_ip_header()
     if header:
-        return request.headers.get(header, "").strip() or peer
+        address = request.headers.get(header, "").strip()
+        if address:
+            return address
+        return peer
+
     hops = trusted_proxy_hops()
     if hops <= 0:
         return peer
-    forwarded = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
-    return forwarded[-hops] if len(forwarded) >= hops else peer
+
+    forwarded = []
+    for part in request.headers.get("x-forwarded-for", "").split(","):
+        address = part.strip()
+        if address:
+            forwarded.append(address)
+    if len(forwarded) < hops:
+        return peer
+    return forwarded[-hops]
 
 
 def _window(key: str, now: float) -> deque[float]:
+    """The key's request times within the last WINDOW seconds, oldest first."""
     hits = _hits.get(key, deque())
-    while hits and now - hits[0] >= WINDOW:
+    while hits:
+        oldest = hits[0]
+        if now - oldest < WINDOW:
+            break
         hits.popleft()
     return hits
 
 
 def _forget_idle(now: float) -> None:
-    for key in [k for k, h in _hits.items() if not h or now - h[-1] >= WINDOW]:
+    idle_keys = []
+    for key, hits in _hits.items():
+        if not hits:
+            idle_keys.append(key)
+            continue
+        newest = hits[-1]
+        if now - newest >= WINDOW:
+            idle_keys.append(key)
+    for key in idle_keys:
         del _hits[key]
+
+
+BUSY_MESSAGE = "The demo is busy right now. Please try again in a minute."
 
 
 def check_rate_limit(request: Request) -> None:
     per_client = int(settings.server.get("rate_limit_per_minute", 0))
     overall = int(settings.server.get("global_rate_limit_per_minute", 0))
+
+    # Each check is (key, limit, message). A limit of 0 turns that check off.
     checks = []
     if overall > 0:
-        checks.append((GLOBAL_KEY, overall, "The demo is busy right now. Please try again in a minute."))
+        checks.append((GLOBAL_KEY, overall, BUSY_MESSAGE))
     if per_client > 0:
-        checks.append((client_ip(request), per_client, f"Rate limit: {per_client} questions per minute. Please wait a moment."))
+        client_message = f"Rate limit: {per_client} questions per minute. Please wait a moment."
+        checks.append((client_ip(request), per_client, client_message))
     if not checks:
         return
+
+    # Refuse if any window is full; nothing is recorded until all checks pass.
     now = time.monotonic()
     windows = []
     for key, limit, message in checks:
@@ -240,11 +306,16 @@ def check_rate_limit(request: Request) -> None:
         if len(hits) >= limit:
             raise HTTPException(429, message)
         windows.append((key, hits))
+
     # Bound memory: drop idle clients, and refuse new ones if still full.
     if len(_hits) >= MAX_TRACKED_CLIENTS:
         _forget_idle(now)
-        if len(_hits) >= MAX_TRACKED_CLIENTS and any(key not in _hits for key, _ in windows):
-            raise HTTPException(429, "The demo is busy right now. Please try again in a minute.")
+        if len(_hits) >= MAX_TRACKED_CLIENTS:
+            for key, _hits_of_key in windows:
+                is_new_client = key not in _hits
+                if is_new_client:
+                    raise HTTPException(429, BUSY_MESSAGE)
+
     for key, hits in windows:
         hits.append(now)
         _hits[key] = hits
@@ -268,9 +339,11 @@ _cache: dict[str, tuple[float, dict]] = {}
 
 def cached(key: str, ttl: float, compute) -> dict:
     now = time.monotonic()
-    hit = _cache.get(key)
-    if hit and now - hit[0] < ttl:
-        return hit[1]
+    entry = _cache.get(key)
+    if entry:
+        stored_at, stored_value = entry
+        if now - stored_at < ttl:
+            return stored_value
     value = compute()
     _cache[key] = (now, value)
     return value
@@ -284,14 +357,11 @@ def info() -> dict:
 def _info() -> dict:
     with state["pool"].connection() as conn:
         status = store.index_status(conn, settings.profile)
-        docs = (
-            conn.execute(
-                f"SELECT title, authors, count(*) AS chunks FROM {settings.table} "  # table name from config, not user input
-                "GROUP BY title, authors ORDER BY title"
-            ).fetchall()
-            if status
-            else []
-        )
+        docs = []
+        if status:  # the index exists, so its table can be read
+            # The table name comes from the config, not from user input.
+            query = f"SELECT title, authors, count(*) AS chunks FROM {settings.table} GROUP BY title, authors ORDER BY title"
+            docs = conn.execute(query).fetchall()
     return {
         "profile": settings.profile,
         "llm": settings.llm.model,
@@ -318,7 +388,12 @@ class Question(BaseModel):
 
 
 def _event(obj: dict) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False) + "\n").encode()
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    return line.encode()
+
+
+# The chunk fields sent to the page for each source.
+SOURCE_FIELDS = ("id", "title", "authors", "section", "pages", "reference", "text")
 
 
 @app.post("/api/ask")
@@ -339,49 +414,49 @@ async def ask(q: Question, request: Request) -> StreamingResponse:
                 with state["pool"].connection() as conn:
                     return retrieve(conn, state["embedder"], settings, question)
 
+            # 1. Retrieve the chunks and send them, numbered from 1.
             sources = await run_in_threadpool(_retrieve)
             t_retrieval = time.monotonic()
-            yield _event(
-                {
-                    "type": "sources",
-                    "sources": [
-                        {
-                            "n": i,
-                            **{k: s[k] for k in ("id", "title", "authors", "section", "pages", "reference", "text")},
-                            "similarity": s.get("similarity"),
-                        }
-                        for i, s in enumerate(sources, 1)
-                    ],
-                }
-            )
+            numbered_sources = []
+            for n, source in enumerate(sources, start=1):
+                item = {"n": n}
+                for field in SOURCE_FIELDS:
+                    item[field] = source[field]
+                item["similarity"] = source.get("similarity")
+                numbered_sources.append(item)
+            yield _event({"type": "sources", "sources": numbered_sources})
+
+            # 2. Stream the answer as the model writes it.
             t_first = None
             truncated = False
-            async for piece in stream_chat(settings.llm, build_messages(question, sources)):
+            messages = build_messages(question, sources)
+            async for piece in stream_chat(settings.llm, messages):
                 if isinstance(piece, Truncated):
                     truncated = True
                     log.warning("answer stopped at the token limit (llm.max_tokens)")
                     continue
-                t_first = t_first or time.monotonic()
+                if not t_first:
+                    t_first = time.monotonic()
                 yield _event({"type": "token", "text": piece})
             t_end = time.monotonic()
-            ms = lambda a, b: round((b - a) * 1000) if a and b else None  # noqa: E731
-            yield _event(
-                {
-                    "type": "done",
-                    "truncated": truncated,
-                    "timings": {
-                        "retrieval_ms": ms(t0, t_retrieval),
-                        "first_token_ms": ms(t0, t_first),
-                        "total_ms": ms(t0, t_end),
-                    },
-                }
-            )
+
+            # 3. Report the timings. A missing time (no token arrived) is None.
+            def ms(start, end):
+                if not start or not end:
+                    return None
+                return round((end - start) * 1000)
+
+            timings = {
+                "retrieval_ms": ms(t0, t_retrieval),
+                "first_token_ms": ms(t0, t_first),
+                "total_ms": ms(t0, t_end),
+            }
+            yield _event({"type": "done", "truncated": truncated, "timings": timings})
         except Exception:  # report to the page instead of cutting the stream
             # Details (provider responses, database hosts) stay in the server log.
             error_id = secrets.token_hex(4)
             log.exception("ask failed [error %s]", error_id)
-            yield _event(
-                {"type": "error", "message": f"Something went wrong while answering (error {error_id}). Please try again."}
-            )
+            message = f"Something went wrong while answering (error {error_id}). Please try again."
+            yield _event({"type": "error", "message": message})
 
     return StreamingResponse(events(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
