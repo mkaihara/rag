@@ -133,6 +133,9 @@ query instruction (`embedding.query_instruction` in `config.yaml`) and the
 system prompt (`SYSTEM_PROMPT` in `rag/retrieve.py`) both name its
 cryptography topics, so other documents would need both edited.
 
+[`docs/REVIEW.md`](docs/REVIEW.md) goes through each module in more detail,
+with the design decisions, measurements and open questions.
+
 ## Evaluation
 
 15 questions ([`eval/questions.yaml`](eval/questions.yaml)), five per paper,
